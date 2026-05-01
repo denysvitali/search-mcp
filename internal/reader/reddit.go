@@ -101,13 +101,13 @@ func fetchRedditThread(ctx context.Context, client *http.Client, parsedURL *url.
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Reddit request failed: %w", err)
+		return nil, fmt.Errorf("reddit request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("Reddit request failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("reddit request failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var payload []redditListing
