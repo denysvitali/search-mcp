@@ -30,6 +30,6 @@ otel: false
 otel_exporter: stdout
 ```
 
-The MCP tool is named `web_search`.
+The MCP tool is named `search`.
 
 Set `--otel --otel-exporter otlp` to export traces and metrics through the OpenTelemetry OTLP HTTP exporters. Standard OTEL environment variables such as `OTEL_EXPORTER_OTLP_ENDPOINT` are honored by the exporter packages.

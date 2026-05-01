@@ -41,7 +41,7 @@ var serveCmd = &cobra.Command{
 			server.WithRecovery(),
 		)
 
-		tool := mcp.NewTool("web_search",
+		tool := mcp.NewTool("search",
 			mcp.WithDescription("Search the web using a configured provider."),
 			mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
 			mcp.WithString("provider", mcp.Description("Provider name: duckduckgo or brave")),

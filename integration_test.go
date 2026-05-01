@@ -72,7 +72,7 @@ func TestIntegrationMCPWebSearchTool(t *testing.T) {
 	}
 
 	request := mcp.CallToolRequest{}
-	request.Params.Name = "web_search"
+	request.Params.Name = "search"
 	request.Params.Arguments = map[string]any{
 		"query":    "integration query",
 		"provider": "duckduckgo",
@@ -81,10 +81,10 @@ func TestIntegrationMCPWebSearchTool(t *testing.T) {
 
 	result, err := mcpClient.CallTool(ctx, request)
 	if err != nil {
-		t.Fatalf("call web_search: %v", err)
+		t.Fatalf("call search: %v", err)
 	}
 	if result.IsError {
-		t.Fatalf("web_search returned error: %#v", result.Content)
+		t.Fatalf("search returned error: %#v", result.Content)
 	}
 
 	text := toolText(t, result)
