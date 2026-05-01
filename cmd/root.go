@@ -36,6 +36,7 @@ func init() {
 	rootCmd.PersistentFlags().String("brave-api-key", "", "Brave Search API key")
 	rootCmd.PersistentFlags().String("brave-endpoint", "", "Brave Search API endpoint")
 	rootCmd.PersistentFlags().String("duckduckgo-endpoint", "", "DuckDuckGo HTML search endpoint")
+	rootCmd.PersistentFlags().String("mojeek-endpoint", "", "Mojeek search HTML endpoint")
 	rootCmd.PersistentFlags().Float64("rate-rps", 1, "requests per second per provider")
 	rootCmd.PersistentFlags().Int("rate-burst", 2, "rate limit burst per provider")
 	rootCmd.PersistentFlags().Bool("otel", false, "enable stdout OpenTelemetry traces and metrics")
@@ -47,6 +48,7 @@ func init() {
 	_ = viper.BindPFlag("brave_api_key", rootCmd.PersistentFlags().Lookup("brave-api-key"))
 	_ = viper.BindPFlag("brave_endpoint", rootCmd.PersistentFlags().Lookup("brave-endpoint"))
 	_ = viper.BindPFlag("duckduckgo_endpoint", rootCmd.PersistentFlags().Lookup("duckduckgo-endpoint"))
+	_ = viper.BindPFlag("mojeek_endpoint", rootCmd.PersistentFlags().Lookup("mojeek-endpoint"))
 	_ = viper.BindPFlag("rate_rps", rootCmd.PersistentFlags().Lookup("rate-rps"))
 	_ = viper.BindPFlag("rate_burst", rootCmd.PersistentFlags().Lookup("rate-burst"))
 	_ = viper.BindPFlag("otel", rootCmd.PersistentFlags().Lookup("otel"))
@@ -92,7 +94,10 @@ func newLogger() logrus.FieldLogger {
 }
 
 func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
-	providers := []search.Provider{provider.NewDuckDuckGo(viper.GetString("duckduckgo_endpoint"))}
+	providers := []search.Provider{
+		provider.NewDuckDuckGo(viper.GetString("duckduckgo_endpoint")),
+		provider.NewMojeek(viper.GetString("mojeek_endpoint")),
+	}
 	if viper.GetString("brave_api_key") != "" {
 		providers = append(providers, provider.NewBrave(viper.GetString("brave_api_key"), viper.GetString("brave_endpoint")))
 	}

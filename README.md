@@ -5,6 +5,7 @@ Go MCP server and CLI for web search.
 ## Providers
 
 - `duckduckgo`: scrapes `https://html.duckduckgo.com/html/` (the same endpoint the DuckDuckGo web UI uses). No API key required. DDG aggressively rate-limits datacenter IPs and serves an anomaly/captcha page after a few requests; the provider returns a clear error when this happens.
+- `mojeek`: scrapes the public `https://www.mojeek.com/search` HTML SERP. No API key required. Mojeek's index is independent (not a Bing/Google reseller), and unlike DDG/Qwant the public web UI currently serves datacenter IPs without a bot wall — at the cost of being more brittle than a JSON API if their HTML changes.
 - `brave`: uses Brave Search API. Set `SEARCH_MCP_BRAVE_API_KEY` or `--brave-api-key`.
 
 ## Usage
@@ -24,6 +25,7 @@ provider: duckduckgo
 brave_api_key: ""
 brave_endpoint: ""
 duckduckgo_endpoint: ""
+mojeek_endpoint: ""
 rate_rps: 1
 rate_burst: 2
 otel: false

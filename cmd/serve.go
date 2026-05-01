@@ -44,7 +44,7 @@ var serveCmd = &cobra.Command{
 		tool := mcp.NewTool("search",
 			mcp.WithDescription("Search the web using a configured provider."),
 			mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
-			mcp.WithString("provider", mcp.Description("Provider name: duckduckgo or brave")),
+			mcp.WithString("provider", mcp.Description("Provider name: duckduckgo, mojeek, or brave")),
 			mcp.WithNumber("count", mcp.Description("Maximum number of results")),
 			mcp.WithString("country", mcp.Description("Provider country code")),
 			mcp.WithString("language", mcp.Description("Provider language code")),
