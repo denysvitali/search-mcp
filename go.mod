@@ -3,6 +3,8 @@ module github.com/denysvitali/search-mcp
 go 1.25.5
 
 require (
+	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.0
+	github.com/PuerkitoBio/goquery v1.12.0
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/mark3labs/mcp-go v0.50.0
 	github.com/sirupsen/logrus v1.9.4
@@ -22,6 +24,8 @@ require (
 )
 
 require (
+	github.com/JohannesKaufmann/dom v0.2.0 // indirect
+	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -37,7 +41,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
+	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect

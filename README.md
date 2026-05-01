@@ -13,6 +13,7 @@ Go MCP server and CLI for web search.
 ```sh
 go run . search "model context protocol" --provider duckduckgo
 SEARCH_MCP_BRAVE_API_KEY=... go run . search "open telemetry go" --provider brave --count 5
+go run . read https://github.com/golang/go/issues/64876
 go run . serve
 ```
 
@@ -32,6 +33,9 @@ otel: false
 otel_exporter: stdout
 ```
 
-The MCP tool is named `search`.
+The MCP server exposes two tools:
+
+- `search` — run a query through one of the providers above.
+- `web_read` — fetch a URL and return Markdown. GitHub repo / issue / pull-request URLs and Reddit comment threads are pulled through their respective JSON APIs; everything else is fetched as HTML and converted via `html-to-markdown`.
 
 Set `--otel --otel-exporter otlp` to export traces and metrics through the OpenTelemetry OTLP HTTP exporters. Standard OTEL environment variables such as `OTEL_EXPORTER_OTLP_ENDPOINT` are honored by the exporter packages.

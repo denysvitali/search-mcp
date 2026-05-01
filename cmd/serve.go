@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/denysvitali/search-mcp/internal/observability"
+	"github.com/denysvitali/search-mcp/internal/reader"
 	searchdomain "github.com/denysvitali/search-mcp/internal/search"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -74,6 +75,22 @@ var serveCmd = &cobra.Command{
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 			return mcp.NewToolResultText(string(data)), nil
+		})
+
+		readTool := mcp.NewTool("web_read",
+			mcp.WithDescription("Fetch a URL and return its content as Markdown. GitHub repo / issue / pull-request URLs and Reddit comment threads are pulled from their JSON APIs; everything else is fetched as HTML and converted."),
+			mcp.WithString("url", mcp.Required(), mcp.Description("The URL to fetch")),
+		)
+		s.AddTool(readTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			urlStr, err := request.RequireString("url")
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			content, err := reader.Read(ctx, urlStr)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultText(content), nil
 		})
 
 		return server.ServeStdio(s)

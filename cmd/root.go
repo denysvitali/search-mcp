@@ -60,6 +60,7 @@ func init() {
 	viper.AutomaticEnv()
 
 	rootCmd.AddCommand(searchCmd)
+	rootCmd.AddCommand(readCmd)
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "version",
