@@ -1,18 +1,23 @@
 package provider
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/denysvitali/search-mcp/internal/search"
+	"golang.org/x/net/html"
 )
 
-const duckDuckGoEndpoint = "https://api.duckduckgo.com/"
+const (
+	duckDuckGoEndpoint  = "https://html.duckduckgo.com/html/"
+	duckDuckGoUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
 
 type DuckDuckGo struct {
 	endpoint string
@@ -32,19 +37,25 @@ func (d *DuckDuckGo) Name() string {
 }
 
 func (d *DuckDuckGo) Search(ctx context.Context, req search.Request) (search.Response, error) {
-	values := url.Values{}
-	values.Set("q", req.Query)
-	values.Set("format", "json")
-	values.Set("no_redirect", "1")
-	values.Set("no_html", "1")
-	values.Set("skip_disambig", "1")
-	values.Set("t", "search-mcp")
+	form := url.Values{}
+	form.Set("q", req.Query)
+	form.Set("b", "")
+	if region := duckRegion(req.Country, req.Language); region != "" {
+		form.Set("kl", region)
+	}
+	if df := duckFreshness(req.Freshness); df != "" {
+		form.Set("df", df)
+	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, d.endpoint+"?"+values.Encode(), nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, d.endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return search.Response{}, err
 	}
-	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.Header.Set("User-Agent", duckDuckGoUserAgent)
+	httpReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	httpReq.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	httpReq.Header.Set("Referer", "https://duckduckgo.com/")
 
 	resp, err := d.client.Do(httpReq)
 	if err != nil {
@@ -56,70 +67,191 @@ func (d *DuckDuckGo) Search(ctx context.Context, req search.Request) (search.Res
 		return search.Response{}, fmt.Errorf("duckduckgo search failed: %s", resp.Status)
 	}
 
-	var payload duckDuckGoResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return search.Response{}, err
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return search.Response{}, fmt.Errorf("read duckduckgo response: %w", err)
+	}
+	if isDuckAnomaly(body) {
+		return search.Response{}, fmt.Errorf("duckduckgo anti-bot challenge served (anomaly page); the source IP is being rate-limited or fingerprinted")
 	}
 
-	results := make([]search.Result, 0, req.Count)
-	if payload.AbstractURL != "" || payload.AbstractText != "" {
-		results = append(results, search.Result{
-			Title:       firstNonEmpty(payload.Heading, req.Query),
-			URL:         payload.AbstractURL,
-			Description: payload.AbstractText,
-			Source:      d.Name(),
-		})
+	doc, err := html.Parse(bytes.NewReader(body))
+	if err != nil {
+		return search.Response{}, fmt.Errorf("parse duckduckgo html: %w", err)
 	}
-	flattenDuckTopics(payload.RelatedTopics, &results, req.Count)
 
-	if len(results) > req.Count {
-		results = results[:req.Count]
+	count := req.Count
+	if count <= 0 {
+		count = 10
 	}
+	results := extractDuckResults(doc, count)
 
 	return search.Response{Query: req.Query, Provider: d.Name(), Results: results}, nil
 }
 
-type duckDuckGoResponse struct {
-	Heading       string     `json:"Heading"`
-	AbstractText  string     `json:"AbstractText"`
-	AbstractURL   string     `json:"AbstractURL"`
-	RelatedTopics []ddgTopic `json:"RelatedTopics"`
-	Results       []ddgTopic `json:"Results"`
+func isDuckAnomaly(body []byte) bool {
+	return bytes.Contains(body, []byte("anomaly.js")) || bytes.Contains(body, []byte("/anomaly/"))
 }
 
-type ddgTopic struct {
-	FirstURL string     `json:"FirstURL"`
-	Text     string     `json:"Text"`
-	Name     string     `json:"Name"`
-	Topics   []ddgTopic `json:"Topics"`
+func duckRegion(country, language string) string {
+	country = strings.ToLower(strings.TrimSpace(country))
+	language = strings.ToLower(strings.TrimSpace(language))
+	switch {
+	case country != "" && language != "":
+		return language + "-" + country
+	case country != "":
+		return "us-" + country
+	case language != "":
+		return language + "-us"
+	}
+	return ""
 }
 
-func flattenDuckTopics(topics []ddgTopic, results *[]search.Result, limit int) {
-	for _, topic := range topics {
-		if len(*results) >= limit {
+func duckFreshness(freshness string) string {
+	switch strings.ToLower(strings.TrimSpace(freshness)) {
+	case "day", "d", "pd":
+		return "d"
+	case "week", "w", "pw":
+		return "w"
+	case "month", "m", "pm":
+		return "m"
+	case "year", "y", "py":
+		return "y"
+	}
+	return ""
+}
+
+func extractDuckResults(root *html.Node, limit int) []search.Result {
+	results := make([]search.Result, 0, limit)
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if len(results) >= limit {
 			return
 		}
-		if len(topic.Topics) > 0 {
-			flattenDuckTopics(topic.Topics, results, limit)
-			continue
+		if n.Type == html.ElementNode && n.Data == "div" && hasClass(n, "result__body") {
+			if r, ok := parseDuckResult(n); ok {
+				results = append(results, r)
+			}
+			return
 		}
-		if topic.FirstURL == "" && topic.Text == "" {
-			continue
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
 		}
-		*results = append(*results, search.Result{
-			Title:       firstNonEmpty(topic.Name, "DuckDuckGo result "+strconv.Itoa(len(*results)+1)),
-			URL:         topic.FirstURL,
-			Description: topic.Text,
-			Source:      "duckduckgo",
-		})
 	}
+	walk(root)
+	return results
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
+func parseDuckResult(node *html.Node) (search.Result, bool) {
+	titleAnchor := findElement(node, func(n *html.Node) bool {
+		return n.Data == "a" && hasClass(n, "result__a")
+	})
+	if titleAnchor == nil {
+		return search.Result{}, false
+	}
+	href := unwrapDuckURL(attr(titleAnchor, "href"))
+	if href == "" || strings.HasPrefix(href, "https://duckduckgo.com/y.js") {
+		return search.Result{}, false
+	}
+	title := strings.TrimSpace(textContent(titleAnchor))
+	if title == "" {
+		return search.Result{}, false
+	}
+
+	snippetNode := findElement(node, func(n *html.Node) bool {
+		return n.Data == "a" && hasClass(n, "result__snippet")
+	})
+	var snippet string
+	if snippetNode != nil {
+		snippet = strings.TrimSpace(textContent(snippetNode))
+	} else if div := findElement(node, func(n *html.Node) bool {
+		return n.Data == "div" && hasClass(n, "result__snippet")
+	}); div != nil {
+		snippet = strings.TrimSpace(textContent(div))
+	}
+
+	return search.Result{
+		Title:       title,
+		URL:         href,
+		Description: snippet,
+		Source:      "duckduckgo",
+	}, true
+}
+
+func unwrapDuckURL(href string) string {
+	if href == "" {
+		return ""
+	}
+	if strings.HasPrefix(href, "//") {
+		href = "https:" + href
+	}
+	u, err := url.Parse(href)
+	if err != nil {
+		return href
+	}
+	if strings.HasSuffix(u.Host, "duckduckgo.com") && strings.HasPrefix(u.Path, "/l/") {
+		if uddg := u.Query().Get("uddg"); uddg != "" {
+			if decoded, err := url.QueryUnescape(uddg); err == nil {
+				return decoded
+			}
+			return uddg
+		}
+	}
+	return href
+}
+
+func hasClass(n *html.Node, class string) bool {
+	for _, a := range n.Attr {
+		if a.Key != "class" {
+			continue
+		}
+		for _, c := range strings.Fields(a.Val) {
+			if c == class {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func attr(n *html.Node, key string) string {
+	for _, a := range n.Attr {
+		if a.Key == key {
+			return a.Val
 		}
 	}
 	return ""
+}
+
+func findElement(root *html.Node, match func(*html.Node) bool) *html.Node {
+	if root == nil {
+		return nil
+	}
+	for c := root.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && match(c) {
+			return c
+		}
+		if found := findElement(c, match); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func textContent(n *html.Node) string {
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == html.TextNode {
+			b.WriteString(n.Data)
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(n)
+	return b.String()
 }

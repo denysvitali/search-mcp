@@ -35,7 +35,7 @@ func init() {
 	rootCmd.PersistentFlags().String("provider", "", "search provider")
 	rootCmd.PersistentFlags().String("brave-api-key", "", "Brave Search API key")
 	rootCmd.PersistentFlags().String("brave-endpoint", "", "Brave Search API endpoint")
-	rootCmd.PersistentFlags().String("duckduckgo-endpoint", "", "DuckDuckGo Instant Answer API endpoint")
+	rootCmd.PersistentFlags().String("duckduckgo-endpoint", "", "DuckDuckGo HTML search endpoint")
 	rootCmd.PersistentFlags().Float64("rate-rps", 1, "requests per second per provider")
 	rootCmd.PersistentFlags().Int("rate-burst", 2, "rate limit burst per provider")
 	rootCmd.PersistentFlags().Bool("otel", false, "enable stdout OpenTelemetry traces and metrics")

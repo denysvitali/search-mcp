@@ -4,7 +4,7 @@ Go MCP server and CLI for web search.
 
 ## Providers
 
-- `duckduckgo`: uses DuckDuckGo Instant Answer API. This is not a full web search API.
+- `duckduckgo`: scrapes `https://html.duckduckgo.com/html/` (the same endpoint the DuckDuckGo web UI uses). No API key required. DDG aggressively rate-limits datacenter IPs and serves an anomaly/captcha page after a few requests; the provider returns a clear error when this happens.
 - `brave`: uses Brave Search API. Set `SEARCH_MCP_BRAVE_API_KEY` or `--brave-api-key`.
 
 ## Usage

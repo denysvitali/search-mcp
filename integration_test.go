@@ -112,18 +112,30 @@ func newDuckDuckGoMock(t *testing.T) *httptest.Server {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.URL.Query().Get("q"); got != "integration query" {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %q, want POST", r.Method)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if got := r.PostForm.Get("q"); got != "integration query" {
 			t.Errorf("query = %q, want integration query", got)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"Heading": "Integration Result",
-			"AbstractText": "Result from the mock DuckDuckGo API.",
-			"AbstractURL": "https://example.test/integration",
-			"RelatedTopics": [
-				{"Text": "Second result", "FirstURL": "https://example.test/second"}
-			]
-		}`))
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>
+<div class="result results_links results_links_deep web-result">
+  <div class="links_main links_deep result__body">
+    <h2 class="result__title"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2Fintegration&amp;rut=abc">Integration Result</a></h2>
+    <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2Fintegration">Result from the mock DuckDuckGo HTML endpoint.</a>
+  </div>
+</div>
+<div class="result results_links results_links_deep web-result">
+  <div class="links_main links_deep result__body">
+    <h2 class="result__title"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2Fsecond">Second Result</a></h2>
+    <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2Fsecond">Second snippet.</a>
+  </div>
+</div>
+</body></html>`))
 	}))
 	t.Cleanup(server.Close)
 	return server
@@ -145,7 +157,10 @@ func assertSearchResponse(t *testing.T, resp searchResponse) {
 		t.Fatalf("first title = %q, want Integration Result", resp.Results[0].Title)
 	}
 	if resp.Results[0].URL != "https://example.test/integration" {
-		t.Fatalf("first URL = %q", resp.Results[0].URL)
+		t.Fatalf("first URL = %q, want https://example.test/integration", resp.Results[0].URL)
+	}
+	if resp.Results[1].URL != "https://example.test/second" {
+		t.Fatalf("second URL = %q, want https://example.test/second", resp.Results[1].URL)
 	}
 }
 
