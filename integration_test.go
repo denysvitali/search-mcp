@@ -121,6 +121,12 @@ func newDuckDuckGoMock(t *testing.T) *httptest.Server {
 		if got := r.PostForm.Get("q"); got != "integration query" {
 			t.Errorf("query = %q, want integration query", got)
 		}
+		if got := r.Header.Get("Sec-Fetch-Site"); got != "same-origin" {
+			t.Errorf("sec-fetch-site = %q, want same-origin", got)
+		}
+		if got := r.Header.Get("Referer"); got != "https://html.duckduckgo.com/" {
+			t.Errorf("referer = %q, want https://html.duckduckgo.com/", got)
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>
 <div class="result results_links results_links_deep web-result">
