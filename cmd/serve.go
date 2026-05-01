@@ -27,7 +27,7 @@ var serveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer shutdown(context.Background())
+		defer func() { _ = shutdown(context.Background()) }()
 
 		service, err := newSearchService(newLogger())
 		if err != nil {
