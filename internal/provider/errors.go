@@ -1,17 +1,16 @@
 package provider
 
-import "errors"
+import "github.com/denysvitali/search-mcp/internal/search"
 
-// Sentinel errors let callers distinguish retryable from permanent failures via
-// errors.Is. Providers wrap them with fmt.Errorf("...: %w", ErrX) so the
-// underlying sentinel stays inspectable.
+// The canonical sentinels live in the search package (provider imports search,
+// so they cannot live here without forcing search to import provider). These
+// aliases keep the provider-local spelling working; because they are the same
+// error values, errors.Is matches whether callers compare against
+// provider.ErrRateLimited or search.ErrRateLimited.
 var (
-	// ErrRateLimited signals a transient rate-limit (e.g. HTTP 429). Callers
-	// should back off and may retry later or fall back to another provider.
-	ErrRateLimited = errors.New("rate limited")
+	// ErrRateLimited signals a transient rate-limit (e.g. HTTP 429).
+	ErrRateLimited = search.ErrRateLimited
 
-	// ErrBlocked signals an anti-bot/captcha challenge. It is effectively
-	// permanent for the current source IP/fingerprint; retrying immediately is
-	// pointless, so callers should fall back to another provider.
-	ErrBlocked = errors.New("blocked by anti-bot challenge")
+	// ErrBlocked signals an anti-bot/captcha challenge.
+	ErrBlocked = search.ErrBlocked
 )
