@@ -98,16 +98,94 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 		req.Provider = names[0]
 	}
 
-	provider, ok := s.providers[req.Provider]
-	if !ok {
-		return Response{}, fmt.Errorf("unknown provider %q", req.Provider)
+	primary := req.Provider
+	if _, ok := s.providers[primary]; !ok {
+		return Response{}, fmt.Errorf("unknown provider %q", primary)
 	}
+
+	span.SetAttributes(
+		attribute.String("search.provider.requested", primary),
+		attribute.Int("search.count", req.Count),
+	)
+
+	// Build the deterministic attempt order: the primary provider first, then the
+	// remaining providers sorted by name. Fan-out only kicks in when a provider
+	// returns a fallback-worthy error (rate limited / blocked).
+	order := []string{primary}
+	for _, name := range s.ProviderNames() {
+		if name != primary {
+			order = append(order, name)
+		}
+	}
+
+	var lastErr error
+	for i, name := range order {
+		// Respect context cancellation/deadlines before each attempt; do not fall
+		// back when the caller has already given up.
+		if err := ctx.Err(); err != nil {
+			if lastErr != nil {
+				return Response{}, lastErr
+			}
+			return Response{}, err
+		}
+
+		attempt := req
+		attempt.Provider = name
+		resp, err := s.searchOne(ctx, span, attempt)
+		if err == nil {
+			if i > 0 {
+				// We only reach here past the primary when a fallback succeeded.
+				span.SetAttributes(
+					attribute.Bool("search.fallback", true),
+					attribute.String("search.fallback.served_by", name),
+				)
+				span.AddEvent("search.fallback", trace.WithAttributes(
+					attribute.String("search.fallback.from", primary),
+					attribute.String("search.fallback.to", name),
+				))
+			}
+			resp.Provider = name
+			return resp, nil
+		}
+
+		lastErr = err
+
+		// Only fall back on transient/blocked failures. Context errors and any
+		// other error return immediately.
+		if ctx.Err() != nil {
+			return Response{}, err
+		}
+		if !isFallbackWorthy(err) {
+			return Response{}, err
+		}
+
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"provider": name,
+		}).Warn("provider failed with fallback-worthy error; trying next provider")
+	}
+
+	if lastErr == nil {
+		lastErr = errors.New("no providers attempted")
+	}
+	return Response{}, fmt.Errorf("all providers failed: %w", lastErr)
+}
+
+// isFallbackWorthy reports whether err is a transient/blocked failure that
+// should trigger trying the next provider.
+func isFallbackWorthy(err error) bool {
+	return errors.Is(err, ErrRateLimited) || errors.Is(err, ErrBlocked)
+}
+
+// searchOne applies the provider's rate limiter and performs a single provider
+// search, recording per-attempt metrics and tracing. req.Provider selects the
+// provider and must already be validated by the caller.
+func (s *Service) searchOne(ctx context.Context, span trace.Span, req Request) (Response, error) {
+	provider := s.providers[req.Provider]
 
 	attrs := []attribute.KeyValue{
 		attribute.String("search.provider", req.Provider),
 		attribute.Int("search.count", req.Count),
 	}
-	span.SetAttributes(attrs...)
 
 	start := time.Now()
 	if err := s.limiters[req.Provider].Wait(ctx); err != nil {

@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -139,6 +140,113 @@ func TestServiceRateLimits(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < 500*time.Millisecond {
 		t.Fatalf("second request waited %v, expected to be throttled", elapsed)
+	}
+}
+
+func TestServiceFallsBackOnRateLimited(t *testing.T) {
+	for _, sentinel := range []error{ErrRateLimited, ErrBlocked} {
+		t.Run(sentinel.Error(), func(t *testing.T) {
+			// "alpha" is the primary (first alphabetically) and fails; "beta" succeeds.
+			primary := &stubProvider{name: "alpha", err: fmt.Errorf("wrapped: %w", sentinel)}
+			secondary := &stubProvider{name: "beta"}
+			service, err := NewService([]Provider{primary, secondary}, 100, 1, logrus.New())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			resp, err := service.Search(context.Background(), Request{Query: "test"})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if resp.Provider != "beta" {
+				t.Fatalf("provider = %q, want beta", resp.Provider)
+			}
+			if primary.lastReq == nil || secondary.lastReq == nil {
+				t.Fatal("both providers should have been called")
+			}
+		})
+	}
+}
+
+func TestServiceNoFallbackOnNonFallbackError(t *testing.T) {
+	wantErr := errors.New("query rejected")
+	primary := &stubProvider{name: "alpha", err: wantErr}
+	secondary := &stubProvider{name: "beta"}
+	service, err := NewService([]Provider{primary, secondary}, 100, 1, logrus.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.Search(context.Background(), Request{Query: "test"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	if secondary.lastReq != nil {
+		t.Fatal("secondary should not have been called on a non-fallback error")
+	}
+}
+
+func TestServiceNoFallbackOnContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	primary := &stubProvider{name: "alpha", err: fmt.Errorf("wrapped: %w", ErrRateLimited)}
+	secondary := &stubProvider{name: "beta"}
+	service, err := NewService([]Provider{primary, secondary}, 100, 1, logrus.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.Search(ctx, Request{Query: "test"})
+	if err == nil {
+		t.Fatal("expected error on cancelled context")
+	}
+	if secondary.lastReq != nil {
+		t.Fatal("secondary should not be tried when context is cancelled")
+	}
+}
+
+func TestServiceAllProvidersFailReturnsSentinel(t *testing.T) {
+	primary := &stubProvider{name: "alpha", err: fmt.Errorf("a: %w", ErrRateLimited)}
+	secondary := &stubProvider{name: "beta", err: fmt.Errorf("b: %w", ErrBlocked)}
+	service, err := NewService([]Provider{primary, secondary}, 100, 1, logrus.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.Search(context.Background(), Request{Query: "test"})
+	if err == nil {
+		t.Fatal("expected error when all providers fail")
+	}
+	// The last error (beta's ErrBlocked) must remain inspectable through wrapping.
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("err = %v, want errors.Is ErrBlocked", err)
+	}
+	if primary.lastReq == nil || secondary.lastReq == nil {
+		t.Fatal("all providers should have been attempted")
+	}
+}
+
+func TestServiceFallbackDeterministicOrder(t *testing.T) {
+	// Primary "mid" fails; remaining providers are tried in sorted order, so
+	// "aaa" must be tried before "zzz". "aaa" succeeds.
+	primary := &stubProvider{name: "mid", err: fmt.Errorf("w: %w", ErrRateLimited)}
+	first := &stubProvider{name: "aaa"}
+	last := &stubProvider{name: "zzz"}
+	service, err := NewService([]Provider{primary, first, last}, 100, 1, logrus.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := service.Search(context.Background(), Request{Query: "test", Provider: "mid"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Provider != "aaa" {
+		t.Fatalf("provider = %q, want aaa (first in sorted fallback order)", resp.Provider)
+	}
+	if last.lastReq != nil {
+		t.Fatal("zzz should not have been tried once aaa succeeded")
 	}
 }
 
