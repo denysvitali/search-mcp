@@ -3,6 +3,7 @@ package reader
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +13,22 @@ import (
 	"time"
 )
 
-const gitHubAPIBaseURL = "https://api.github.com"
+// gitHubAPIBaseURL is the GitHub REST API root. It is a var (not a const) so
+// tests can point it at an httptest server.
+var gitHubAPIBaseURL = "https://api.github.com"
+
+const (
+	// gitHubAPIVersion is the value sent in the X-GitHub-Api-Version header.
+	gitHubAPIVersion = "2022-11-28"
+
+	// gitHubPerPage is the page size requested for paginated list endpoints
+	// (GitHub's maximum is 100).
+	gitHubPerPage = 100
+
+	// gitHubMaxPages caps how many pages we follow for any paginated list,
+	// bounding work for very large threads.
+	gitHubMaxPages = 10
+)
 
 type gitHubThreadKind string
 
@@ -167,7 +183,13 @@ func fetchGitHubRepoAsMarkdown(ctx context.Context, client *http.Client, parsedU
 		return "", err
 	}
 
-	readme, _ := fetchGitHubReadme(ctx, client, owner, repo)
+	readme, err := fetchGitHubReadme(ctx, client, owner, repo)
+	if err != nil && !errors.Is(err, errGitHubReadmeNotFound) {
+		// A missing README (404) is fine and yields empty content; any
+		// other failure (rate limit, server error, ...) is real and
+		// should be reported rather than silently dropped.
+		return "", err
+	}
 
 	var b strings.Builder
 	fullName := repoResp.FullName
@@ -217,27 +239,37 @@ func fetchGitHubRepoAsMarkdown(ctx context.Context, client *http.Client, parsedU
 	return b.String(), nil
 }
 
+// errGitHubReadmeNotFound signals that a repository simply has no README
+// (HTTP 404), which is a normal condition rather than a fetch failure.
+var errGitHubReadmeNotFound = errors.New("github readme not found")
+
 func fetchGitHubReadme(ctx context.Context, client *http.Client, owner, repo string) (string, error) {
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/readme", gitHubAPIBaseURL, owner, repo)
 	req, err := newRequest(ctx, endpoint, "application/vnd.github.raw")
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("X-GitHub-Api-Version", gitHubAPIVersion)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("GitHub README request failed: %w", err)
+		return "", fmt.Errorf("github readme request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return "", errGitHubReadmeNotFound
+	}
+	if err := checkGitHubRateLimit(resp); err != nil {
+		return "", err
+	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub README request failed: HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("github readme request failed: HTTP %d: %s", resp.StatusCode, decodeGitHubAPIError(resp.Body))
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(limitedBody(resp.Body))
 	if err != nil {
-		return "", fmt.Errorf("failed to read README body: %w", err)
+		return "", fmt.Errorf("failed to read readme body: %w", err)
 	}
 	return string(body), nil
 }
@@ -262,9 +294,9 @@ func fetchGitHubThread(ctx context.Context, client *http.Client, parsedURL *url.
 		return nil, err
 	}
 
-	var issueCommentsResp []gitHubIssueCommentResponse
 	issueCommentsEndpoint := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", gitHubAPIBaseURL, owner, repo, number)
-	if err := fetchGitHubJSON(ctx, client, issueCommentsEndpoint, &issueCommentsResp); err != nil {
+	issueCommentsResp, err := fetchGitHubPaginated[gitHubIssueCommentResponse](ctx, client, issueCommentsEndpoint)
+	if err != nil {
 		return nil, err
 	}
 
@@ -313,9 +345,9 @@ func fetchGitHubThread(ctx context.Context, client *http.Client, parsedURL *url.
 		return nil, err
 	}
 
-	var reviewCommentsResp []gitHubReviewCommentResponse
 	reviewCommentsEndpoint := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/comments", gitHubAPIBaseURL, owner, repo, number)
-	if err := fetchGitHubJSON(ctx, client, reviewCommentsEndpoint, &reviewCommentsResp); err != nil {
+	reviewCommentsResp, err := fetchGitHubPaginated[gitHubReviewCommentResponse](ctx, client, reviewCommentsEndpoint)
+	if err != nil {
 		return nil, err
 	}
 
@@ -349,28 +381,138 @@ func fetchGitHubThread(ctx context.Context, client *http.Client, parsedURL *url.
 	return thread, nil
 }
 
-func fetchGitHubJSON(ctx context.Context, client *http.Client, endpoint string, target interface{}) error {
+// checkGitHubRateLimit inspects a response for rate-limit / abuse responses and
+// returns a clear, non-retryable error if the request was throttled. It returns
+// nil for any other status (including success).
+func checkGitHubRateLimit(resp *http.Response) error {
+	rateLimited := resp.StatusCode == http.StatusTooManyRequests
+	if resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		rateLimited = true
+	}
+	if !rateLimited {
+		return nil
+	}
+
+	detail := "github api rate limit exceeded"
+	if reset := resp.Header.Get("X-RateLimit-Reset"); reset != "" {
+		detail = fmt.Sprintf("%s (resets at unix %s)", detail, reset)
+	}
+	if retry := resp.Header.Get("Retry-After"); retry != "" {
+		detail = fmt.Sprintf("%s (retry after %ss)", detail, retry)
+	}
+	return fmt.Errorf("%s: HTTP %d", detail, resp.StatusCode)
+}
+
+// doGitHubRequest issues a single GitHub API GET, returning the response so the
+// caller can decode it. It surfaces rate-limit and non-200 errors uniformly.
+func doGitHubRequest(ctx context.Context, client *http.Client, endpoint string) (*http.Response, error) {
 	req, err := newRequest(ctx, endpoint, "application/vnd.github+json")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("X-GitHub-Api-Version", gitHubAPIVersion)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("GitHub request failed: %w", err)
+		return nil, fmt.Errorf("github request failed: %w", err)
+	}
+
+	if err := checkGitHubRateLimit(resp); err != nil {
+		resp.Body.Close()
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("github api request failed: HTTP %d: %s", resp.StatusCode, decodeGitHubAPIError(resp.Body))
+		resp.Body.Close()
+		return nil, err
+	}
+	return resp, nil
+}
+
+func fetchGitHubJSON(ctx context.Context, client *http.Client, endpoint string, target interface{}) error {
+	resp, err := doGitHubRequest(ctx, client, endpoint)
+	if err != nil {
+		return err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GitHub API request failed: HTTP %d: %s", resp.StatusCode, decodeGitHubAPIError(resp.Body))
+	if err := json.NewDecoder(limitedBody(resp.Body)).Decode(target); err != nil {
+		return fmt.Errorf("failed to decode github response from %s: %w", endpoint, err)
 	}
-
-	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
-		return fmt.Errorf("failed to decode GitHub response from %s: %w", endpoint, err)
-	}
-
 	return nil
+}
+
+// fetchGitHubPaginated retrieves every page of a list endpoint, following the
+// Link header's rel="next" relation, up to gitHubMaxPages. Each page is decoded
+// into a fresh []T and appended to the accumulated result.
+func fetchGitHubPaginated[T any](ctx context.Context, client *http.Client, endpoint string) ([]T, error) {
+	var all []T
+
+	next := withPerPage(endpoint, gitHubPerPage)
+	for page := 0; page < gitHubMaxPages && next != ""; page++ {
+		resp, err := doGitHubRequest(ctx, client, next)
+		if err != nil {
+			return nil, err
+		}
+
+		var batch []T
+		decodeErr := json.NewDecoder(limitedBody(resp.Body)).Decode(&batch)
+		nextURL := parseGitHubNextLink(resp.Header.Get("Link"))
+		resp.Body.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("failed to decode github response from %s: %w", next, decodeErr)
+		}
+
+		all = append(all, batch...)
+
+		// Stop early when the page is short: there is no further data even
+		// if a Link header is (unexpectedly) present.
+		if len(batch) < gitHubPerPage {
+			break
+		}
+		next = nextURL
+	}
+
+	return all, nil
+}
+
+// withPerPage adds a per_page query parameter to a GitHub list endpoint,
+// preserving any existing query values.
+func withPerPage(endpoint string, perPage int) string {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	query := parsed.Query()
+	query.Set("per_page", strconv.Itoa(perPage))
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+// parseGitHubNextLink extracts the rel="next" URL from a GitHub Link header,
+// returning "" when there is no next page.
+func parseGitHubNextLink(header string) string {
+	if strings.TrimSpace(header) == "" {
+		return ""
+	}
+	for _, part := range strings.Split(header, ",") {
+		section := strings.Split(strings.TrimSpace(part), ";")
+		if len(section) < 2 {
+			continue
+		}
+		linkURL := strings.TrimSpace(section[0])
+		if !strings.HasPrefix(linkURL, "<") || !strings.HasSuffix(linkURL, ">") {
+			continue
+		}
+		linkURL = linkURL[1 : len(linkURL)-1]
+		for _, param := range section[1:] {
+			param = strings.TrimSpace(param)
+			if param == `rel="next"` || param == "rel=next" {
+				return linkURL
+			}
+		}
+	}
+	return ""
 }
 
 func renderGitHubThreadMarkdown(thread *gitHubThread) string {

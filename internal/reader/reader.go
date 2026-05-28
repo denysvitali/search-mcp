@@ -25,6 +25,14 @@ const (
 	defaultAcceptLang    = "en-US,en;q=0.9"
 	defaultHTTPTimeout   = 30 * time.Second
 	maxHTTPRedirectCount = 10
+
+	// maxResponseBodyBytes caps how many bytes we read from any remote
+	// response body, protecting against unbounded/malicious payloads.
+	maxResponseBodyBytes = 10 << 20 // 10 MiB
+
+	// maxConsecutiveBlankLines is the largest run of blank lines that
+	// cleanMarkdown leaves in its output.
+	maxConsecutiveBlankLines = 1
 )
 
 var supportedSchemes = []string{"http", "https"}
@@ -89,6 +97,13 @@ func newRequest(ctx context.Context, urlStr, accept string) (*http.Request, erro
 	return req, nil
 }
 
+// limitedBody wraps a response body with an io.LimitReader capped at
+// maxResponseBodyBytes so that downstream readers/parsers cannot be forced to
+// consume an unbounded amount of memory.
+func limitedBody(r io.Reader) io.Reader {
+	return io.LimitReader(r, maxResponseBodyBytes)
+}
+
 func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr string) (string, error) {
 	req, err := newRequest(ctx, urlStr, defaultAccept)
 	if err != nil {
@@ -107,14 +122,14 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 
 	contentType := resp.Header.Get("Content-Type")
 	if !strings.Contains(contentType, "text/html") && !strings.Contains(contentType, "application/xhtml") {
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(limitedBody(resp.Body))
 		if err != nil {
 			return "", fmt.Errorf("failed to read response body: %w", err)
 		}
 		return string(body), nil
 	}
 
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	doc, err := goquery.NewDocumentFromReader(limitedBody(resp.Body))
 	if err != nil {
 		return "", fmt.Errorf("failed to parse HTML: %w", err)
 	}
@@ -166,7 +181,7 @@ func cleanMarkdown(markdown string) string {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			emptyCount++
-			if emptyCount <= 2 {
+			if emptyCount <= maxConsecutiveBlankLines {
 				cleaned = append(cleaned, "")
 			}
 		} else {

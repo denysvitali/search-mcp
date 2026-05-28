@@ -18,6 +18,14 @@ const (
 	redditReplyPerCommentLimit = 5
 )
 
+// redditAPIScheme and redditAPIHost are the scheme/host used to build the JSON
+// endpoint. They are vars (not consts) so tests can point them at an httptest
+// server.
+var (
+	redditAPIScheme = "https"
+	redditAPIHost   = "www.reddit.com"
+)
+
 type redditThread struct {
 	ID          string
 	Subreddit   string
@@ -30,6 +38,10 @@ type redditThread struct {
 	URL         string
 	Body        string
 	Comments    []redditComment
+	// TotalComments is the number of top-level comments seen before the
+	// redditTopCommentLimit cap was applied, used to report how many were
+	// omitted from the rendered output.
+	TotalComments int
 }
 
 type redditComment struct {
@@ -39,6 +51,9 @@ type redditComment struct {
 	Body      string
 	CreatedAt time.Time
 	Replies   []redditComment
+	// TotalReplies is the number of direct replies seen before the
+	// redditReplyPerCommentLimit cap was applied.
+	TotalReplies int
 }
 
 type redditListing struct {
@@ -111,26 +126,28 @@ func fetchRedditThread(ctx context.Context, client *http.Client, parsedURL *url.
 	}
 
 	var payload []redditListing
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("failed to decode Reddit JSON response: %w", err)
+	if err := json.NewDecoder(limitedBody(resp.Body)).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("failed to decode reddit JSON response: %w", err)
 	}
 	if len(payload) < 2 || len(payload[0].Data.Children) == 0 {
 		return nil, fmt.Errorf("unexpected Reddit JSON response shape")
 	}
 
 	post := payload[0].Data.Children[0].Data
+	comments, totalComments := parseRedditComments(payload[1].Data.Children, 0, redditCommentDepthLimit, redditTopCommentLimit)
 	thread := &redditThread{
-		ID:          post.ID,
-		Subreddit:   post.Subreddit,
-		Title:       post.Title,
-		Author:      defaultRedditAuthor(post.Author),
-		Score:       post.Score,
-		NumComments: post.NumComments,
-		CreatedAt:   redditUnixTime(post.CreatedUTC),
-		Permalink:   post.Permalink,
-		URL:         post.URL,
-		Body:        strings.TrimSpace(post.SelfText),
-		Comments:    parseRedditComments(payload[1].Data.Children, 0, redditCommentDepthLimit),
+		ID:            post.ID,
+		Subreddit:     post.Subreddit,
+		Title:         post.Title,
+		Author:        defaultRedditAuthor(post.Author),
+		Score:         post.Score,
+		NumComments:   post.NumComments,
+		CreatedAt:     redditUnixTime(post.CreatedUTC),
+		Permalink:     post.Permalink,
+		URL:           post.URL,
+		Body:          strings.TrimSpace(post.SelfText),
+		Comments:      comments,
+		TotalComments: totalComments,
 	}
 
 	return thread, nil
@@ -138,8 +155,8 @@ func fetchRedditThread(ctx context.Context, client *http.Client, parsedURL *url.
 
 func redditJSONEndpoint(parsedURL *url.URL) string {
 	endpoint := *parsedURL
-	endpoint.Scheme = "https"
-	endpoint.Host = "www.reddit.com"
+	endpoint.Scheme = redditAPIScheme
+	endpoint.Host = redditAPIHost
 	trimmedPath := strings.TrimRight(endpoint.Path, "/")
 	if trimmedPath == "" {
 		trimmedPath = "/"
@@ -151,10 +168,20 @@ func redditJSONEndpoint(parsedURL *url.URL) string {
 	return endpoint.String()
 }
 
-func parseRedditComments(children []redditThing, depth, maxDepth int) []redditComment {
+// parseRedditComments converts a listing's children into redditComment values.
+// limit caps how many comments are retained at this level (0 or negative means
+// no cap); replies are only descended while depth < maxDepth. It also returns
+// the total number of comment-kind ("t1") children seen before capping, so
+// callers can report how many were omitted.
+func parseRedditComments(children []redditThing, depth, maxDepth, limit int) ([]redditComment, int) {
 	comments := make([]redditComment, 0, len(children))
+	total := 0
 	for _, child := range children {
 		if child.Kind != "t1" {
+			continue
+		}
+		total++
+		if limit > 0 && len(comments) >= limit {
 			continue
 		}
 
@@ -166,24 +193,29 @@ func parseRedditComments(children []redditThing, depth, maxDepth int) []redditCo
 			CreatedAt: redditUnixTime(child.Data.CreatedUTC),
 		}
 		if depth < maxDepth {
-			comment.Replies = parseRedditReplies(child.Data.Replies, depth+1, maxDepth)
+			comment.Replies, comment.TotalReplies = parseRedditReplies(child.Data.Replies, depth+1, maxDepth, redditReplyPerCommentLimit)
 		}
 		comments = append(comments, comment)
 	}
-	return comments
+	return comments, total
 }
 
-func parseRedditReplies(rawReplies json.RawMessage, depth, maxDepth int) []redditComment {
+func parseRedditReplies(rawReplies json.RawMessage, depth, maxDepth, limit int) ([]redditComment, int) {
 	trimmed := bytes.TrimSpace(rawReplies)
+	// Reddit encodes "no replies" as an empty string, null, or an omitted
+	// value; treat all of those as zero replies.
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte(`""`)) {
-		return nil
+		return nil, 0
 	}
 
 	var listing redditListing
 	if err := json.Unmarshal(trimmed, &listing); err != nil {
-		return nil
+		// Malformed/unexpected replies payload (e.g. a "more" stub or
+		// truncated JSON). We can't recover the subtree, so we skip it
+		// rather than failing the whole thread render.
+		return nil, 0
 	}
-	return parseRedditComments(listing.Data.Children, depth, maxDepth)
+	return parseRedditComments(listing.Data.Children, depth, maxDepth, limit)
 }
 
 func renderRedditThreadMarkdown(thread *redditThread) string {
@@ -216,9 +248,7 @@ func renderRedditThreadMarkdown(thread *redditThread) string {
 		return cleanMarkdown(builder.String())
 	}
 
-	topLevelCount := minInt(len(thread.Comments), redditTopCommentLimit)
-	for i := 0; i < topLevelCount; i++ {
-		comment := thread.Comments[i]
+	for i, comment := range thread.Comments {
 		fmt.Fprintf(&builder, "### Comment %d by u/%s (score: %d)\n\n", i+1, comment.Author, comment.Score)
 		if strings.TrimSpace(comment.Body) == "" {
 			builder.WriteString("_No comment body available._\n\n")
@@ -232,9 +262,7 @@ func renderRedditThreadMarkdown(thread *redditThread) string {
 		}
 
 		builder.WriteString("#### Replies\n\n")
-		replyCount := minInt(len(comment.Replies), redditReplyPerCommentLimit)
-		for idx := 0; idx < replyCount; idx++ {
-			reply := comment.Replies[idx]
+		for idx, reply := range comment.Replies {
 			fmt.Fprintf(&builder, "%d. **u/%s** (score: %d)\n\n", idx+1, reply.Author, reply.Score)
 			if strings.TrimSpace(reply.Body) == "" {
 				builder.WriteString("_No reply body available._\n\n")
@@ -244,13 +272,13 @@ func renderRedditThreadMarkdown(thread *redditThread) string {
 			}
 		}
 
-		if len(comment.Replies) > replyCount {
-			fmt.Fprintf(&builder, "_... %d more replies omitted._\n\n", len(comment.Replies)-replyCount)
+		if comment.TotalReplies > len(comment.Replies) {
+			fmt.Fprintf(&builder, "_... %d more replies omitted._\n\n", comment.TotalReplies-len(comment.Replies))
 		}
 	}
 
-	if len(thread.Comments) > topLevelCount {
-		fmt.Fprintf(&builder, "_... %d more top-level comments omitted._\n", len(thread.Comments)-topLevelCount)
+	if thread.TotalComments > len(thread.Comments) {
+		fmt.Fprintf(&builder, "_... %d more top-level comments omitted._\n", thread.TotalComments-len(thread.Comments))
 	}
 
 	return cleanMarkdown(builder.String())
@@ -267,13 +295,10 @@ func redditUnixTime(seconds float64) time.Time {
 	if seconds <= 0 {
 		return time.Time{}
 	}
-	nanoSeconds := int64(seconds * float64(time.Second))
-	return time.Unix(0, nanoSeconds).UTC()
-}
-
-func minInt(left, right int) int {
-	if left < right {
-		return left
-	}
-	return right
+	// Split into whole seconds and fractional nanoseconds instead of
+	// multiplying the whole value by 1e9, which loses precision once the
+	// epoch (~1.7e9) is scaled into the float64 mantissa.
+	whole := int64(seconds)
+	nanos := int64((seconds - float64(whole)) * float64(time.Second))
+	return time.Unix(whole, nanos).UTC()
 }
