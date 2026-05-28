@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/denysvitali/search-mcp/internal/provider"
+	"github.com/denysvitali/search-mcp/internal/resilience"
 	"github.com/denysvitali/search-mcp/internal/search"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -47,6 +49,11 @@ func init() {
 	rootCmd.PersistentFlags().String("mojeek-endpoint", "", "Mojeek search HTML endpoint")
 	rootCmd.PersistentFlags().Float64("rate-rps", 1, "requests per second per provider")
 	rootCmd.PersistentFlags().Int("rate-burst", 2, "rate limit burst per provider")
+	rootCmd.PersistentFlags().Int("retry-max-attempts", 3, "max attempts per provider on transient failures")
+	rootCmd.PersistentFlags().Duration("retry-base-delay", 200*time.Millisecond, "base delay for retry exponential backoff")
+	rootCmd.PersistentFlags().Int("breaker-threshold", 5, "consecutive failures before a provider's circuit opens")
+	rootCmd.PersistentFlags().Duration("breaker-cooldown", 30*time.Second, "open-circuit cooldown before a half-open trial")
+	rootCmd.PersistentFlags().Duration("cache-ttl", 0, "in-memory result cache TTL (0 disables caching)")
 	rootCmd.PersistentFlags().Bool("otel", false, "enable stdout OpenTelemetry traces and metrics")
 	rootCmd.PersistentFlags().String("otel-exporter", "stdout", "OpenTelemetry exporter: stdout or otlp")
 	rootCmd.PersistentFlags().String("otel-endpoint", "", "OTLP exporter endpoint (overrides OTEL_EXPORTER_OTLP_ENDPOINT)")
@@ -61,6 +68,11 @@ func init() {
 	_ = viper.BindPFlag("mojeek_endpoint", rootCmd.PersistentFlags().Lookup("mojeek-endpoint"))
 	_ = viper.BindPFlag("rate_rps", rootCmd.PersistentFlags().Lookup("rate-rps"))
 	_ = viper.BindPFlag("rate_burst", rootCmd.PersistentFlags().Lookup("rate-burst"))
+	_ = viper.BindPFlag("retry_max_attempts", rootCmd.PersistentFlags().Lookup("retry-max-attempts"))
+	_ = viper.BindPFlag("retry_base_delay", rootCmd.PersistentFlags().Lookup("retry-base-delay"))
+	_ = viper.BindPFlag("breaker_threshold", rootCmd.PersistentFlags().Lookup("breaker-threshold"))
+	_ = viper.BindPFlag("breaker_cooldown", rootCmd.PersistentFlags().Lookup("breaker-cooldown"))
+	_ = viper.BindPFlag("cache_ttl", rootCmd.PersistentFlags().Lookup("cache-ttl"))
 	_ = viper.BindPFlag("otel", rootCmd.PersistentFlags().Lookup("otel"))
 	_ = viper.BindPFlag("otel_exporter", rootCmd.PersistentFlags().Lookup("otel-exporter"))
 	_ = viper.BindPFlag("otel_endpoint", rootCmd.PersistentFlags().Lookup("otel-endpoint"))
@@ -116,16 +128,24 @@ func newLogger() logrus.FieldLogger {
 }
 
 func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
+	resilienceCfg := resilience.Config{
+		RetryMaxAttempts: viper.GetInt("retry_max_attempts"),
+		RetryBaseDelay:   viper.GetDuration("retry_base_delay"),
+		BreakerThreshold: viper.GetInt("breaker_threshold"),
+		BreakerCooldown:  viper.GetDuration("breaker_cooldown"),
+		CacheTTL:         viper.GetDuration("cache_ttl"),
+	}
+
 	providers := []search.Provider{
-		provider.NewDuckDuckGo(viper.GetString("duckduckgo_endpoint")),
-		provider.NewMojeek(viper.GetString("mojeek_endpoint")),
+		resilience.Wrap(provider.NewDuckDuckGo(viper.GetString("duckduckgo_endpoint")), resilienceCfg),
+		resilience.Wrap(provider.NewMojeek(viper.GetString("mojeek_endpoint")), resilienceCfg),
 	}
 	if viper.GetString("brave_api_key") != "" {
 		brave, err := provider.NewBraveChecked(viper.GetString("brave_api_key"), viper.GetString("brave_endpoint"))
 		if err != nil {
 			return nil, fmt.Errorf("brave provider: %w", err)
 		}
-		providers = append(providers, brave)
+		providers = append(providers, resilience.Wrap(brave, resilienceCfg))
 	}
 	return search.NewService(providers, viper.GetFloat64("rate_rps"), viper.GetInt("rate_burst"), logger)
 }
