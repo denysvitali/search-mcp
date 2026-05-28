@@ -57,6 +57,15 @@ func Read(ctx context.Context, urlStr string) (string, error) {
 	if isGitHubRepoURL(parsedURL) {
 		return fetchGitHubRepoAsMarkdown(ctx, client, parsedURL)
 	}
+	if isHackerNewsItemURL(parsedURL) {
+		return fetchHackerNewsContentAsMarkdown(ctx, client, parsedURL)
+	}
+	if isStackOverflowQuestionURL(parsedURL) {
+		return fetchStackOverflowContentAsMarkdown(ctx, client, parsedURL)
+	}
+	if isArxivURL(parsedURL) {
+		return fetchArxivContentAsMarkdown(ctx, client, parsedURL)
+	}
 	return fetchGenericHTMLAsMarkdown(ctx, client, parsedURL.String())
 }
 
