@@ -1,15 +1,14 @@
 package provider
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/denysvitali/search-mcp/internal/htmlutil"
 	"github.com/denysvitali/search-mcp/internal/search"
 	"golang.org/x/net/html"
 )
@@ -29,7 +28,7 @@ func NewMojeek(endpoint ...string) *Mojeek {
 	if len(endpoint) > 0 && endpoint[0] != "" {
 		target = endpoint[0]
 	}
-	return &Mojeek{endpoint: target, client: &http.Client{Timeout: 15 * time.Second}}
+	return &Mojeek{endpoint: target, client: newHTTPClient(defaultHTTPTimeout)}
 }
 
 func (m *Mojeek) Name() string {
@@ -57,6 +56,7 @@ func (m *Mojeek) Search(ctx context.Context, req search.Request) (search.Respons
 	httpReq.Header.Set("User-Agent", mojeekUserAgent)
 	httpReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	httpReq.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	applyExtraHeaders(httpReq, req)
 
 	resp, err := m.client.Do(httpReq)
 	if err != nil {
@@ -65,7 +65,7 @@ func (m *Mojeek) Search(ctx context.Context, req search.Request) (search.Respons
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return search.Response{}, errors.New("mojeek rate limit hit (HTTP 429); back off and retry later")
+		return search.Response{}, fmt.Errorf("mojeek returned http 429; back off and retry later: %w", ErrRateLimited)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return search.Response{}, fmt.Errorf("mojeek search failed: status %d", resp.StatusCode)
@@ -113,8 +113,8 @@ func mojeekSince(freshness string) string {
 }
 
 func extractMojeekResults(root *html.Node, limit int) []search.Result {
-	resultsList := findElement(root, func(n *html.Node) bool {
-		return n.Data == "ul" && hasClass(n, "results-standard")
+	resultsList := htmlutil.FindElement(root, func(n *html.Node) bool {
+		return n.Data == "ul" && htmlutil.HasClass(n, "results-standard")
 	})
 	if resultsList == nil {
 		return nil
@@ -133,33 +133,33 @@ func extractMojeekResults(root *html.Node, limit int) []search.Result {
 }
 
 func parseMojeekResult(li *html.Node) (search.Result, bool) {
-	urlAnchor := findElement(li, func(n *html.Node) bool {
-		return n.Data == "a" && hasClass(n, "ob")
+	urlAnchor := htmlutil.FindElement(li, func(n *html.Node) bool {
+		return n.Data == "a" && htmlutil.HasClass(n, "ob")
 	})
 	if urlAnchor == nil {
 		return search.Result{}, false
 	}
-	href := strings.TrimSpace(attr(urlAnchor, "href"))
+	href := strings.TrimSpace(htmlutil.Attr(urlAnchor, "href"))
 	if href == "" {
 		return search.Result{}, false
 	}
 
-	titleAnchor := findElement(li, func(n *html.Node) bool {
-		return n.Data == "a" && hasClass(n, "title")
+	titleAnchor := htmlutil.FindElement(li, func(n *html.Node) bool {
+		return n.Data == "a" && htmlutil.HasClass(n, "title")
 	})
 	if titleAnchor == nil {
 		return search.Result{}, false
 	}
-	title := strings.TrimSpace(textContent(titleAnchor))
+	title := strings.TrimSpace(htmlutil.TextContent(titleAnchor))
 	if title == "" {
 		return search.Result{}, false
 	}
 
 	snippet := ""
-	if p := findElement(li, func(n *html.Node) bool {
-		return n.Data == "p" && hasClass(n, "s")
+	if p := htmlutil.FindElement(li, func(n *html.Node) bool {
+		return n.Data == "p" && htmlutil.HasClass(n, "s")
 	}); p != nil {
-		snippet = collapseWhitespace(textContent(p))
+		snippet = htmlutil.CollapseWhitespace(htmlutil.TextContent(p))
 	}
 
 	return search.Result{
@@ -168,21 +168,4 @@ func parseMojeekResult(li *html.Node) (search.Result, bool) {
 		Description: snippet,
 		Source:      "mojeek",
 	}, true
-}
-
-func collapseWhitespace(s string) string {
-	var b bytes.Buffer
-	prevSpace := false
-	for _, r := range strings.TrimSpace(s) {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
-			if !prevSpace {
-				b.WriteByte(' ')
-				prevSpace = true
-			}
-			continue
-		}
-		b.WriteRune(r)
-		prevSpace = false
-	}
-	return b.String()
 }

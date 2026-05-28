@@ -3,14 +3,13 @@ package provider
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
+	"github.com/denysvitali/search-mcp/internal/htmlutil"
 	"github.com/denysvitali/search-mcp/internal/search"
 	"golang.org/x/net/html"
 )
@@ -30,7 +29,7 @@ func NewDuckDuckGo(endpoint ...string) *DuckDuckGo {
 	if len(endpoint) > 0 && endpoint[0] != "" {
 		target = endpoint[0]
 	}
-	return &DuckDuckGo{endpoint: target, client: &http.Client{Timeout: 15 * time.Second}}
+	return &DuckDuckGo{endpoint: target, client: newHTTPClient(defaultHTTPTimeout)}
 }
 
 func (d *DuckDuckGo) Name() string {
@@ -55,6 +54,7 @@ func (d *DuckDuckGo) Search(ctx context.Context, req search.Request) (search.Res
 	for k, v := range duckDuckGoHeaders() {
 		httpReq.Header.Set(k, v)
 	}
+	applyExtraHeaders(httpReq, req)
 
 	resp, err := d.client.Do(httpReq)
 	if err != nil {
@@ -71,7 +71,7 @@ func (d *DuckDuckGo) Search(ctx context.Context, req search.Request) (search.Res
 	// failure mode is a 200 that still contains anomaly.js. Treat both as the
 	// same condition so callers fall back to another provider.
 	if isDuckAnomaly(body) {
-		return search.Response{}, errors.New("duckduckgo anti-bot challenge served (anomaly page); the source IP is being rate-limited or fingerprinted")
+		return search.Response{}, fmt.Errorf("duckduckgo served anomaly page; source ip rate-limited or fingerprinted: %w", ErrBlocked)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return search.Response{}, fmt.Errorf("duckduckgo search failed: status %d", resp.StatusCode)
@@ -149,7 +149,7 @@ func extractDuckResults(root *html.Node, limit int) []search.Result {
 		if len(results) >= limit {
 			return
 		}
-		if n.Type == html.ElementNode && n.Data == "div" && hasClass(n, "result__body") {
+		if n.Type == html.ElementNode && n.Data == "div" && htmlutil.HasClass(n, "result__body") {
 			if r, ok := parseDuckResult(n); ok {
 				results = append(results, r)
 			}
@@ -164,31 +164,31 @@ func extractDuckResults(root *html.Node, limit int) []search.Result {
 }
 
 func parseDuckResult(node *html.Node) (search.Result, bool) {
-	titleAnchor := findElement(node, func(n *html.Node) bool {
-		return n.Data == "a" && hasClass(n, "result__a")
+	titleAnchor := htmlutil.FindElement(node, func(n *html.Node) bool {
+		return n.Data == "a" && htmlutil.HasClass(n, "result__a")
 	})
 	if titleAnchor == nil {
 		return search.Result{}, false
 	}
-	href := unwrapDuckURL(attr(titleAnchor, "href"))
+	href := unwrapDuckURL(htmlutil.Attr(titleAnchor, "href"))
 	if href == "" || strings.HasPrefix(href, "https://duckduckgo.com/y.js") {
 		return search.Result{}, false
 	}
-	title := strings.TrimSpace(textContent(titleAnchor))
+	title := strings.TrimSpace(htmlutil.TextContent(titleAnchor))
 	if title == "" {
 		return search.Result{}, false
 	}
 
-	snippetNode := findElement(node, func(n *html.Node) bool {
-		return n.Data == "a" && hasClass(n, "result__snippet")
+	snippetNode := htmlutil.FindElement(node, func(n *html.Node) bool {
+		return n.Data == "a" && htmlutil.HasClass(n, "result__snippet")
 	})
 	var snippet string
 	if snippetNode != nil {
-		snippet = strings.TrimSpace(textContent(snippetNode))
-	} else if div := findElement(node, func(n *html.Node) bool {
-		return n.Data == "div" && hasClass(n, "result__snippet")
+		snippet = strings.TrimSpace(htmlutil.TextContent(snippetNode))
+	} else if div := htmlutil.FindElement(node, func(n *html.Node) bool {
+		return n.Data == "div" && htmlutil.HasClass(n, "result__snippet")
 	}); div != nil {
-		snippet = strings.TrimSpace(textContent(div))
+		snippet = strings.TrimSpace(htmlutil.TextContent(div))
 	}
 
 	return search.Result{
@@ -219,60 +219,4 @@ func unwrapDuckURL(href string) string {
 		}
 	}
 	return href
-}
-
-func hasClass(n *html.Node, class string) bool {
-	for _, a := range n.Attr {
-		if a.Key != "class" {
-			continue
-		}
-		for _, c := range strings.Fields(a.Val) {
-			if c == class {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func attr(n *html.Node, key string) string {
-	for _, a := range n.Attr {
-		if a.Key == key {
-			return a.Val
-		}
-	}
-	return ""
-}
-
-func findElement(root *html.Node, match func(*html.Node) bool) *html.Node {
-	if root == nil {
-		return nil
-	}
-	for c := root.FirstChild; c != nil; c = c.NextSibling {
-		if c.Type == html.ElementNode && match(c) {
-			return c
-		}
-		if found := findElement(c, match); found != nil {
-			return found
-		}
-	}
-	return nil
-}
-
-func textContent(n *html.Node) string {
-	var b strings.Builder
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n == nil {
-			return
-		}
-		if n.Type == html.TextNode {
-			b.WriteString(n.Data)
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
-	}
-	walk(n)
-	return b.String()
 }

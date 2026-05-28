@@ -2,9 +2,9 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/denysvitali/search-mcp/internal/search"
@@ -106,16 +106,62 @@ func TestMojeekSearchSurfacesRateLimit(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "rate limit") {
-		t.Fatalf("error = %q, want rate limit mention", err.Error())
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("error = %v, want ErrRateLimited", err)
+	}
+}
+
+func TestMojeekSafeSearch(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"off", "0"},
+		{"0", "0"},
+		{"none", "0"},
+		{"OFF", "0"},
+		{" off ", "0"},
+		{"", "1"},
+		{"strict", "1"},
+		{"1", "1"},
+		{"on", "1"},
+	}
+	for _, c := range cases {
+		if got := mojeekSafeSearch(c.in); got != c.want {
+			t.Errorf("mojeekSafeSearch(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 
 func TestMojeekSinceFreshness(t *testing.T) {
-	if got := mojeekSince(""); got != "" {
-		t.Errorf("empty freshness = %q, want empty", got)
+	empties := []string{"", "   ", "bogus", "lastdecade"}
+	for _, in := range empties {
+		if got := mojeekSince(in); got != "" {
+			t.Errorf("mojeekSince(%q) = %q, want empty", in, got)
+		}
 	}
-	if got := mojeekSince("week"); len(got) != 8 {
-		t.Errorf("week = %q, want YYYYMMDD", got)
+	nonEmpty := []string{"day", "d", "pd", "week", "w", "pw", "month", "m", "pm", "year", "y", "py", "WEEK"}
+	for _, in := range nonEmpty {
+		if got := mojeekSince(in); len(got) != 8 {
+			t.Errorf("mojeekSince(%q) = %q, want YYYYMMDD", in, got)
+		}
+	}
+}
+
+func TestMojeekSearchPropagatesExtraHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Test-Header"); got != "abc123" {
+			t.Errorf("X-Test-Header = %q, want abc123", got)
+		}
+		_, _ = w.Write([]byte(mojeekFixture))
+	}))
+	defer server.Close()
+
+	m := NewMojeek(server.URL)
+	_, err := m.Search(context.Background(), search.Request{
+		Query:        "x",
+		ExtraHeaders: map[string]string{"X-Test-Header": "abc123"},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

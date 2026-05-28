@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -18,6 +19,13 @@ var (
 	rootCmd = &cobra.Command{
 		Use:   "search-mcp",
 		Short: "Search the web from CLI or MCP",
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if showVersion, _ := cmd.Flags().GetBool("version"); showVersion {
+				fmt.Fprintln(cmd.OutOrStdout(), version)
+				os.Exit(0)
+			}
+			return nil
+		},
 	}
 )
 
@@ -41,7 +49,9 @@ func init() {
 	rootCmd.PersistentFlags().Int("rate-burst", 2, "rate limit burst per provider")
 	rootCmd.PersistentFlags().Bool("otel", false, "enable stdout OpenTelemetry traces and metrics")
 	rootCmd.PersistentFlags().String("otel-exporter", "stdout", "OpenTelemetry exporter: stdout or otlp")
+	rootCmd.PersistentFlags().String("otel-endpoint", "", "OTLP exporter endpoint (overrides OTEL_EXPORTER_OTLP_ENDPOINT)")
 	rootCmd.PersistentFlags().String("log-level", "info", "log level")
+	rootCmd.PersistentFlags().Bool("version", false, "print version and exit")
 
 	_ = viper.BindPFlag("config", rootCmd.PersistentFlags().Lookup("config"))
 	_ = viper.BindPFlag("provider", rootCmd.PersistentFlags().Lookup("provider"))
@@ -53,6 +63,7 @@ func init() {
 	_ = viper.BindPFlag("rate_burst", rootCmd.PersistentFlags().Lookup("rate-burst"))
 	_ = viper.BindPFlag("otel", rootCmd.PersistentFlags().Lookup("otel"))
 	_ = viper.BindPFlag("otel_exporter", rootCmd.PersistentFlags().Lookup("otel-exporter"))
+	_ = viper.BindPFlag("otel_endpoint", rootCmd.PersistentFlags().Lookup("otel-endpoint"))
 	_ = viper.BindPFlag("log_level", rootCmd.PersistentFlags().Lookup("log-level"))
 
 	viper.SetEnvPrefix("SEARCH_MCP")
@@ -80,17 +91,27 @@ func initConfig() {
 		viper.AddConfigPath(".")
 		viper.AddConfigPath("$HOME/.config/search-mcp")
 	}
-	_ = viper.ReadInConfig()
+	if err := viper.ReadInConfig(); err != nil {
+		var notFound viper.ConfigFileNotFoundError
+		if !errors.As(err, &notFound) {
+			// Surface real problems (e.g. malformed YAML, unreadable file).
+			fmt.Fprintf(os.Stderr, "error: reading config file: %v\n", err)
+		}
+	}
 }
 
 func newLogger() logrus.FieldLogger {
 	logger := logrus.New()
-	level, err := logrus.ParseLevel(viper.GetString("log_level"))
+	logger.SetOutput(os.Stderr)
+	logLevel := viper.GetString("log_level")
+	level, err := logrus.ParseLevel(logLevel)
 	if err != nil {
 		level = logrus.InfoLevel
+		logger.SetLevel(level)
+		logger.WithError(err).Warnf("invalid log_level %q, defaulting to %q", logLevel, level)
+		return logger
 	}
 	logger.SetLevel(level)
-	logger.SetOutput(os.Stderr)
 	return logger
 }
 
@@ -100,7 +121,11 @@ func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
 		provider.NewMojeek(viper.GetString("mojeek_endpoint")),
 	}
 	if viper.GetString("brave_api_key") != "" {
-		providers = append(providers, provider.NewBrave(viper.GetString("brave_api_key"), viper.GetString("brave_endpoint")))
+		brave, err := provider.NewBraveChecked(viper.GetString("brave_api_key"), viper.GetString("brave_endpoint"))
+		if err != nil {
+			return nil, fmt.Errorf("brave provider: %w", err)
+		}
+		providers = append(providers, brave)
 	}
 	return search.NewService(providers, viper.GetFloat64("rate_rps"), viper.GetInt("rate_burst"), logger)
 }
