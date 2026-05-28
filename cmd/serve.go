@@ -3,7 +3,10 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/denysvitali/search-mcp/internal/observability"
 	"github.com/denysvitali/search-mcp/internal/reader"
@@ -14,15 +17,40 @@ import (
 	"github.com/spf13/viper"
 )
 
+const (
+	// toolSearch is the MCP tool name for web search.
+	toolSearch = "search"
+	// toolWebRead is the MCP tool name for fetching a URL as Markdown.
+	toolWebRead = "web_read"
+
+	// maxResultCount caps the requested result count to a sane upper bound.
+	maxResultCount = 100
+)
+
+// clampCount validates and clamps an MCP-supplied result count, rejecting
+// negative values and capping absurdly large ones before casting to int.
+func clampCount(v float64) (int, error) {
+	if v < 0 {
+		return 0, fmt.Errorf("count must not be negative, got %v", v)
+	}
+	if v > maxResultCount {
+		return maxResultCount, nil
+	}
+	return int(v), nil
+}
+
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Run the MCP stdio server",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		ctx := cmd.Context()
+		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+
 		shutdown, err := observability.Setup(ctx, observability.Config{
 			Enabled:     viper.GetBool("otel"),
 			ServiceName: "search-mcp",
 			Exporter:    viper.GetString("otel_exporter"),
+			Endpoint:    viper.GetString("otel_endpoint"),
 			Writer:      os.Stderr,
 		})
 		if err != nil {
@@ -42,7 +70,7 @@ var serveCmd = &cobra.Command{
 			server.WithRecovery(),
 		)
 
-		tool := mcp.NewTool("search",
+		tool := mcp.NewTool(toolSearch,
 			mcp.WithDescription("Search the web using a configured provider."),
 			mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
 			mcp.WithString("provider", mcp.Description("Provider name: duckduckgo, mojeek, or brave")),
@@ -58,10 +86,14 @@ var serveCmd = &cobra.Command{
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
+			count, err := clampCount(request.GetFloat("count", float64(viper.GetInt("count"))))
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
 			resp, err := service.Search(ctx, searchdomain.Request{
 				Query:      query,
 				Provider:   request.GetString("provider", viper.GetString("provider")),
-				Count:      int(request.GetFloat("count", float64(viper.GetInt("count")))),
+				Count:      count,
 				Country:    request.GetString("country", viper.GetString("country")),
 				Language:   request.GetString("language", viper.GetString("language")),
 				SafeSearch: request.GetString("safe_search", viper.GetString("safe_search")),
@@ -77,7 +109,7 @@ var serveCmd = &cobra.Command{
 			return mcp.NewToolResultText(string(data)), nil
 		})
 
-		readTool := mcp.NewTool("web_read",
+		readTool := mcp.NewTool(toolWebRead,
 			mcp.WithDescription("Fetch a URL and return its content as Markdown. GitHub repo / issue / pull-request URLs and Reddit comment threads are pulled from their JSON APIs; everything else is fetched as HTML and converted."),
 			mcp.WithString("url", mcp.Required(), mcp.Description("The URL to fetch")),
 		)
@@ -93,6 +125,12 @@ var serveCmd = &cobra.Command{
 			return mcp.NewToolResultText(content), nil
 		})
 
-		return server.ServeStdio(s)
+		// Drive the stdio server with the signal-aware context so SIGINT/SIGTERM
+		// trigger a clean shutdown.
+		stdio := server.NewStdioServer(s)
+		if err := stdio.Listen(ctx, os.Stdin, os.Stdout); err != nil && ctx.Err() == nil {
+			return err
+		}
+		return nil
 	},
 }

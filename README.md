@@ -31,6 +31,7 @@ rate_rps: 1
 rate_burst: 2
 otel: false
 otel_exporter: stdout
+otel_endpoint: ""
 ```
 
 The MCP server exposes two tools:

@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -17,11 +18,23 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 )
 
+// defaultMetricInterval is the periodic metric export interval used when none
+// is configured.
+const defaultMetricInterval = 30 * time.Second
+
 type Config struct {
 	Enabled     bool
 	ServiceName string
-	Exporter    string
-	Writer      io.Writer
+	// Exporter selects the exporter backend: "stdout" or "otlp".
+	Exporter string
+	// Endpoint, when set, overrides the OTLP exporter endpoint (otherwise the
+	// standard OTEL_EXPORTER_OTLP_ENDPOINT env var / default is used). Ignored
+	// for the stdout exporter.
+	Endpoint string
+	// MetricInterval overrides the periodic metric export interval. Defaults to
+	// 30s when zero.
+	MetricInterval time.Duration
+	Writer         io.Writer
 }
 
 func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error) {
@@ -36,6 +49,9 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 	}
 	if cfg.Exporter == "" {
 		cfg.Exporter = "stdout"
+	}
+	if cfg.MetricInterval <= 0 {
+		cfg.MetricInterval = defaultMetricInterval
 	}
 
 	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
@@ -58,7 +74,7 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 		return nil, err
 	}
 	meterProvider := metric.NewMeterProvider(
-		metric.WithReader(metric.NewPeriodicReader(metricExporter, metric.WithInterval(30*time.Second))),
+		metric.WithReader(metric.NewPeriodicReader(metricExporter, metric.WithInterval(cfg.MetricInterval))),
 		metric.WithResource(res),
 	)
 	otel.SetMeterProvider(meterProvider)
@@ -69,15 +85,31 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 }
 
 func newTraceExporter(ctx context.Context, cfg Config) (trace.SpanExporter, error) {
-	if cfg.Exporter == "otlp" {
-		return otlptracehttp.New(ctx)
+	switch cfg.Exporter {
+	case "otlp":
+		opts := []otlptracehttp.Option{}
+		if cfg.Endpoint != "" {
+			opts = append(opts, otlptracehttp.WithEndpointURL(cfg.Endpoint))
+		}
+		return otlptracehttp.New(ctx, opts...)
+	case "stdout":
+		return stdouttrace.New(stdouttrace.WithWriter(cfg.Writer))
+	default:
+		return nil, fmt.Errorf("unknown otel exporter %q (want \"stdout\" or \"otlp\")", cfg.Exporter)
 	}
-	return stdouttrace.New(stdouttrace.WithWriter(cfg.Writer))
 }
 
 func newMetricExporter(ctx context.Context, cfg Config) (metric.Exporter, error) {
-	if cfg.Exporter == "otlp" {
-		return otlpmetrichttp.New(ctx)
+	switch cfg.Exporter {
+	case "otlp":
+		opts := []otlpmetrichttp.Option{}
+		if cfg.Endpoint != "" {
+			opts = append(opts, otlpmetrichttp.WithEndpointURL(cfg.Endpoint))
+		}
+		return otlpmetrichttp.New(ctx, opts...)
+	case "stdout":
+		return stdoutmetric.New(stdoutmetric.WithWriter(cfg.Writer))
+	default:
+		return nil, fmt.Errorf("unknown otel exporter %q (want \"stdout\" or \"otlp\")", cfg.Exporter)
 	}
-	return stdoutmetric.New(stdoutmetric.WithWriter(cfg.Writer))
 }

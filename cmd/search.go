@@ -22,6 +22,7 @@ var searchCmd = &cobra.Command{
 			Enabled:     viper.GetBool("otel"),
 			ServiceName: "search-mcp",
 			Exporter:    viper.GetString("otel_exporter"),
+			Endpoint:    viper.GetString("otel_endpoint"),
 			Writer:      os.Stderr,
 		})
 		if err != nil {

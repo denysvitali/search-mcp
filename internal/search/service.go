@@ -16,12 +16,18 @@ import (
 )
 
 type Service struct {
+	// providers maps a provider name to its implementation.
 	providers map[string]Provider
-	limiters  map[string]*rate.Limiter
-	logger    logrus.FieldLogger
-	tracer    trace.Tracer
-	requests  metric.Int64Counter
-	latency   metric.Float64Histogram
+	// limiters holds one rate limiter per provider name.
+	limiters map[string]*rate.Limiter
+	// logger is used for diagnostics and non-fatal warnings.
+	logger logrus.FieldLogger
+	// tracer creates spans for search operations.
+	tracer trace.Tracer
+	// requests counts search requests, labelled by provider and status. May be nil if instrument creation failed.
+	requests metric.Int64Counter
+	// latency records search request durations in milliseconds. May be nil if instrument creation failed.
+	latency metric.Float64Histogram
 }
 
 func NewService(providers []Provider, requestsPerSecond float64, burst int, logger logrus.FieldLogger) (*Service, error) {
@@ -36,8 +42,16 @@ func NewService(providers []Provider, requestsPerSecond float64, burst int, logg
 	}
 
 	meter := otel.Meter("search-mcp/search")
-	requests, _ := meter.Int64Counter("search_requests_total")
-	latency, _ := meter.Float64Histogram("search_request_duration_ms")
+	requests, err := meter.Int64Counter("search_requests_total")
+	if err != nil {
+		logger.WithError(err).Warn("failed to create search_requests_total counter; request metrics disabled")
+		requests = nil
+	}
+	latency, err := meter.Float64Histogram("search_request_duration_ms")
+	if err != nil {
+		logger.WithError(err).Warn("failed to create search_request_duration_ms histogram; latency metrics disabled")
+		latency = nil
+	}
 
 	s := &Service{
 		providers: make(map[string]Provider, len(providers)),
@@ -77,7 +91,11 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 		req.Count = 10
 	}
 	if req.Provider == "" {
-		req.Provider = s.ProviderNames()[0]
+		names := s.ProviderNames()
+		if len(names) == 0 {
+			return Response{}, errors.New("no providers configured")
+		}
+		req.Provider = names[0]
 	}
 
 	provider, ok := s.providers[req.Provider]
@@ -93,7 +111,7 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 
 	start := time.Now()
 	if err := s.limiters[req.Provider].Wait(ctx); err != nil {
-		s.requests.Add(ctx, 1, metric.WithAttributes(attribute.String("search.provider", req.Provider), attribute.String("search.status", "rate_limited")))
+		s.countRequest(ctx, req.Provider, "rate_limited")
 		return Response{}, err
 	}
 
@@ -104,7 +122,20 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 		span.RecordError(err)
 	}
 
-	s.requests.Add(ctx, 1, metric.WithAttributes(attribute.String("search.provider", req.Provider), attribute.String("search.status", status)))
-	s.latency.Record(ctx, float64(time.Since(start).Milliseconds()), metric.WithAttributes(attrs...))
+	s.countRequest(ctx, req.Provider, status)
+	if s.latency != nil {
+		s.latency.Record(ctx, float64(time.Since(start).Milliseconds()), metric.WithAttributes(attrs...))
+	}
 	return resp, err
+}
+
+// countRequest increments the request counter if it is available.
+func (s *Service) countRequest(ctx context.Context, provider, status string) {
+	if s.requests == nil {
+		return
+	}
+	s.requests.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("search.provider", provider),
+		attribute.String("search.status", status),
+	))
 }
