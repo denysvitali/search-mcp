@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -92,8 +91,7 @@ func fetchHackerNewsItem(ctx context.Context, client *http.Client, id int) (*hac
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("hacker news request failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("hacker news request failed: HTTP %d: %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var item hackerNewsItem

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -21,17 +20,17 @@ type arxivFeed struct {
 }
 
 type arxivEntry struct {
-	ID        string         `xml:"id"`
-	Title     string         `xml:"title"`
-	Summary   string         `xml:"summary"`
-	Published string         `xml:"published"`
-	Updated   string         `xml:"updated"`
-	Authors   []arxivAuthor  `xml:"author"`
-	Links     []arxivLink    `xml:"link"`
-	Category  []arxivCategry `xml:"category"`
-	Primary   arxivCategry   `xml:"primary_category"`
-	Comment   string         `xml:"comment"`
-	DOI       string         `xml:"doi"`
+	ID        string          `xml:"id"`
+	Title     string          `xml:"title"`
+	Summary   string          `xml:"summary"`
+	Published string          `xml:"published"`
+	Updated   string          `xml:"updated"`
+	Authors   []arxivAuthor   `xml:"author"`
+	Links     []arxivLink     `xml:"link"`
+	Category  []arxivCategory `xml:"category"`
+	Primary   arxivCategory   `xml:"primary_category"`
+	Comment   string          `xml:"comment"`
+	DOI       string          `xml:"doi"`
 }
 
 type arxivAuthor struct {
@@ -45,7 +44,7 @@ type arxivLink struct {
 	Title string `xml:"title,attr"`
 }
 
-type arxivCategry struct {
+type arxivCategory struct {
 	Term string `xml:"term,attr"`
 }
 
@@ -99,8 +98,7 @@ func fetchArxivContentAsMarkdown(ctx context.Context, client *http.Client, parse
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("arxiv request failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", fmt.Errorf("arxiv request failed: HTTP %d: %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var feed arxivFeed
@@ -184,7 +182,7 @@ func arxivAuthorNames(authors []arxivAuthor) []string {
 	return names
 }
 
-func arxivCategories(categories []arxivCategry) []string {
+func arxivCategories(categories []arxivCategory) []string {
 	terms := make([]string, 0, len(categories))
 	for _, category := range categories {
 		term := strings.TrimSpace(category.Term)

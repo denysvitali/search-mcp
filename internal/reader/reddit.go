@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -121,8 +120,7 @@ func fetchRedditThread(ctx context.Context, client *http.Client, parsedURL *url.
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("reddit request failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("reddit request failed: HTTP %d: %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var payload []redditListing

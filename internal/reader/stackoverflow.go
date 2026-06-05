@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -118,8 +117,7 @@ func fetchStackOverflowItems[T any](ctx context.Context, client *http.Client, en
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("stack overflow request failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("stack overflow request failed: HTTP %d: %s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 
 	var payload stackOverflowResponse[T]
