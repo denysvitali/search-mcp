@@ -54,8 +54,11 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 		cfg.MetricInterval = defaultMetricInterval
 	}
 
-	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
-		semconv.SchemaURL,
+	// NewSchemaless (no schema URL) lets this merge with resource.Default()
+	// regardless of which semconv schema version the SDK's default carries;
+	// resource.Merge rejects two resources that each declare a different
+	// schema URL.
+	res, err := resource.Merge(resource.Default(), resource.NewSchemaless(
 		semconv.ServiceName(cfg.ServiceName),
 	))
 	if err != nil {
