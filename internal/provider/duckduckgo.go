@@ -62,7 +62,7 @@ func (d *DuckDuckGo) Search(ctx context.Context, req search.Request) (search.Res
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(limitedBody(resp.Body))
 	if err != nil {
 		return search.Response{}, fmt.Errorf("read duckduckgo response: %w", err)
 	}

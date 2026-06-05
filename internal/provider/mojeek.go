@@ -71,7 +71,7 @@ func (m *Mojeek) Search(ctx context.Context, req search.Request) (search.Respons
 		return search.Response{}, fmt.Errorf("mojeek search failed: status %d", resp.StatusCode)
 	}
 
-	doc, err := html.Parse(resp.Body)
+	doc, err := html.Parse(limitedBody(resp.Body))
 	if err != nil {
 		return search.Response{}, fmt.Errorf("parse mojeek html: %w", err)
 	}

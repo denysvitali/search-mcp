@@ -101,7 +101,7 @@ func (b *Brave) Search(ctx context.Context, req search.Request) (search.Response
 	}
 
 	var payload braveResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.NewDecoder(limitedBody(resp.Body)).Decode(&payload); err != nil {
 		return search.Response{}, err
 	}
 

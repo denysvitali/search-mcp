@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"io"
 	"net/http"
 	"time"
 
@@ -10,6 +11,17 @@ import (
 // defaultHTTPTimeout is the request timeout used by all providers unless
 // overridden.
 const defaultHTTPTimeout = 15 * time.Second
+
+// maxResponseBodyBytes caps how many bytes any provider reads from a remote
+// response body, protecting against unbounded/malicious payloads.
+const maxResponseBodyBytes = 10 << 20 // 10 MiB
+
+// limitedBody wraps a response body with an io.LimitReader capped at
+// maxResponseBodyBytes so a provider cannot be forced to consume an unbounded
+// amount of memory.
+func limitedBody(r io.Reader) io.Reader {
+	return io.LimitReader(r, maxResponseBodyBytes)
+}
 
 // newHTTPClient builds an *http.Client shared per provider instance. A timeout
 // of <= 0 falls back to defaultHTTPTimeout.
