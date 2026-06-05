@@ -151,9 +151,11 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 		lastErr = err
 
 		// Only fall back on transient/blocked failures. Context errors and any
-		// other error return immediately.
+		// other error return immediately. Surface the context's own error so
+		// the real cancellation/deadline reason is not masked by the provider
+		// error that the cancellation triggered.
 		if ctx.Err() != nil {
-			return Response{}, err
+			return Response{}, ctx.Err()
 		}
 		if !isFallbackWorthy(err) {
 			return Response{}, err
