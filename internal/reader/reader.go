@@ -7,10 +7,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
@@ -30,12 +32,21 @@ const (
 	// response body, protecting against unbounded/malicious payloads.
 	maxResponseBodyBytes = 10 << 20 // 10 MiB
 
+	// maxErrorBodyBytes caps how many bytes of a non-OK response body we read
+	// to include in an error message.
+	maxErrorBodyBytes = 4096
+
 	// maxConsecutiveBlankLines is the largest run of blank lines that
 	// cleanMarkdown leaves in its output.
 	maxConsecutiveBlankLines = 1
 )
 
 var supportedSchemes = []string{"http", "https"}
+
+// allowPrivateHosts disables the SSRF guard in guardDialAddress. It is only
+// ever flipped by the test suite so it can target httptest servers bound to
+// loopback addresses; production code leaves it false.
+var allowPrivateHosts = false
 
 // Read fetches the URL and returns its content as Markdown. GitHub repo /
 // issue / pull-request URLs and Reddit comment threads are routed through
@@ -81,7 +92,17 @@ func validateURL(urlStr string) (*url.URL, error) {
 }
 
 func newHTTPClient() *http.Client {
-	client := &http.Client{Timeout: defaultHTTPTimeout}
+	dialer := &net.Dialer{Timeout: defaultHTTPTimeout, Control: guardDialAddress}
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
+	client := &http.Client{Timeout: defaultHTTPTimeout, Transport: transport}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= maxHTTPRedirectCount {
 			return fmt.Errorf("too many redirects")
@@ -89,6 +110,53 @@ func newHTTPClient() *http.Client {
 		return nil
 	}
 	return client
+}
+
+// guardDialAddress runs after DNS resolution, just before the socket connects,
+// so it sees the concrete IP the request will hit — including addresses reached
+// via redirects or DNS rebinding. It refuses any non-public destination so the
+// reader (which fetches caller-supplied URLs) cannot be turned into an SSRF
+// vector against loopback, private, or link-local services such as the cloud
+// metadata endpoint (169.254.169.254).
+func guardDialAddress(_, address string, _ syscall.RawConn) error {
+	if allowPrivateHosts {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid dial address %q: %w", address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("could not parse dial ip %q", host)
+	}
+	if isDisallowedIP(ip) {
+		return fmt.Errorf("refusing to connect to non-public address %s", ip)
+	}
+	return nil
+}
+
+// isDisallowedIP reports whether ip is a loopback, private, link-local,
+// unspecified, or multicast address that the reader must never connect to.
+func isDisallowedIP(ip net.IP) bool {
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	return ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() ||
+		ip.IsMulticast()
+}
+
+// readErrorBody reads up to maxErrorBodyBytes from a non-OK response body and
+// returns it trimmed, for embedding in error messages. A read failure yields
+// an empty string rather than masking the original status error.
+func readErrorBody(r io.Reader) string {
+	body, _ := io.ReadAll(io.LimitReader(r, maxErrorBodyBytes))
+	return strings.TrimSpace(string(body))
 }
 
 func newRequest(ctx context.Context, urlStr, accept string) (*http.Request, error) {
