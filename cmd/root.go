@@ -100,7 +100,10 @@ func initConfig() {
 	} else {
 		viper.SetConfigName("search-mcp")
 		viper.SetConfigType("yaml")
-		viper.AddConfigPath(".")
+		// Only look in the dedicated search-mcp config dir. We
+		// intentionally skip "." so running from inside another project
+		// (e.g. one with its own search-mcp.yaml) does not silently shadow
+		// the global config. Use --config to point at a project-local file.
 		viper.AddConfigPath("$HOME/.config/search-mcp")
 	}
 	if err := viper.ReadInConfig(); err != nil {

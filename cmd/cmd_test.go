@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/denysvitali/search-mcp/internal/search"
 	"github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
 )
 
 func TestClampCount(t *testing.T) {
@@ -78,5 +81,55 @@ func TestRenderResultsEmpty(t *testing.T) {
 	out := renderResults(search.Response{Provider: "mojeek", Query: "x"})
 	if !strings.Contains(out, "No results.") {
 		t.Errorf("expected empty-results message, got %q", out)
+	}
+}
+
+// TestInitConfig_IgnoresCwdConfig verifies that a search-mcp.yaml in the
+// current working directory is NOT picked up by initConfig. This prevents
+// running search-mcp from inside another project (e.g. one with its own
+// search-mcp.yaml) from silently shadowing the global config in
+// ~/.config/search-mcp/search-mcp.yaml.
+func TestInitConfig_IgnoresCwdConfig(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+
+	// A foreign search-mcp.yaml in the current dir — must NOT be loaded.
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "search-mcp.yaml"), []byte("log_level: error\n"), 0o644); err != nil {
+		t.Fatalf("write cwd config: %v", err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// The global config that must win.
+	globalDir := filepath.Join(tmpHome, ".config", "search-mcp")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatalf("mkdir global: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(globalDir, "search-mcp.yaml"), []byte("log_level: debug\n"), 0o644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+
+	// Use a local viper so we don't pollute the package-global one.
+	v := viper.New()
+	if cfg := v.GetString("config"); cfg != "" {
+		v.SetConfigFile(cfg)
+	} else {
+		v.SetConfigName("search-mcp")
+		v.SetConfigType("yaml")
+		v.AddConfigPath("$HOME/.config/search-mcp")
+	}
+	if err := v.ReadInConfig(); err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if got := v.GetString("log_level"); got != "debug" {
+		t.Errorf("log_level = %q, want %q (global config should win over cwd)", got, "debug")
 	}
 }
