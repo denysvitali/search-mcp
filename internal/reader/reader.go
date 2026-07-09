@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -259,21 +260,195 @@ func extractPDFText(body []byte) (string, error) {
 		return "", fmt.Errorf("failed to parse PDF: %w", err)
 	}
 
-	var text strings.Builder
+	pages := extractPDFPages(reader)
+	return cleanMarkdown(strings.Join(pages, "\n\n")), nil
+}
+
+func extractPDFPages(reader *pdf.Reader) []string {
+	pages := make([]string, 0, reader.NumPage())
 	for page := 1; page <= reader.NumPage(); page++ {
-		if page > 1 {
-			text.WriteString("\n")
+		pages = append(pages, extractPDFPage(reader.Page(page)))
+	}
+	return pages
+}
+
+func extractPDFPage(page pdf.Page) string {
+	var text strings.Builder
+	for _, row := range pdfRows(page) {
+		line := joinPDFRow(row)
+		if line == "" {
+			continue
 		}
-		for _, row := range pdfRows(reader.Page(page)) {
-			line := joinPDFRow(row)
-			if line == "" {
+		text.WriteString(line)
+		text.WriteString("\n")
+	}
+	return strings.TrimSpace(text.String())
+}
+
+func formatPDFPages(pages []string, selected []int, query string, contextLines, maxResults int) string {
+	lowerQuery := strings.ToLower(query)
+	var output strings.Builder
+	results := 0
+	for _, pageNumber := range selected {
+		lines := strings.Split(pages[pageNumber-1], "\n")
+		if query == "" {
+			if results >= maxResults {
+				break
+			}
+			writePDFPage(&output, pageNumber, lines)
+			results++
+			continue
+		}
+
+		for lineNumber, line := range lines {
+			if !strings.Contains(strings.ToLower(line), lowerQuery) {
 				continue
 			}
-			text.WriteString(line)
-			text.WriteString("\n")
+			if results >= maxResults {
+				break
+			}
+			start := max(0, lineNumber-contextLines)
+			end := min(len(lines), lineNumber+contextLines+1)
+			writePDFPageLines(&output, pageNumber, start+1, lines[start:end])
+			results++
 		}
 	}
-	return cleanMarkdown(text.String()), nil
+	return strings.TrimSpace(output.String())
+}
+
+func writePDFPage(output *strings.Builder, pageNumber int, lines []string) {
+	writePDFPageLines(output, pageNumber, 1, lines)
+}
+
+func writePDFPageLines(output *strings.Builder, pageNumber, firstLine int, lines []string) {
+	if output.Len() > 0 {
+		output.WriteString("\n\n")
+	}
+	fmt.Fprintf(output, "## Page %d\n", pageNumber)
+	for offset, line := range lines {
+		fmt.Fprintf(output, "%d: %s\n", firstLine+offset, line)
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func parsePDFPageSpec(spec string, totalPages int) ([]int, error) {
+	if strings.TrimSpace(spec) == "" {
+		pages := make([]int, totalPages)
+		for i := range pages {
+			pages[i] = i + 1
+		}
+		return pages, nil
+	}
+
+	seen := make(map[int]bool)
+	var pages []int
+	for _, part := range strings.Split(spec, ",") {
+		bounds := strings.Split(strings.TrimSpace(part), "-")
+		if len(bounds) > 2 || len(bounds) == 0 {
+			return nil, fmt.Errorf("invalid page range %q", part)
+		}
+		start, err := strconv.Atoi(strings.TrimSpace(bounds[0]))
+		if err != nil {
+			return nil, fmt.Errorf("invalid page range %q", part)
+		}
+		end := start
+		if len(bounds) == 2 {
+			end, err = strconv.Atoi(strings.TrimSpace(bounds[1]))
+			if err != nil {
+				return nil, fmt.Errorf("invalid page range %q", part)
+			}
+		}
+		if start < 1 || end < start || end > totalPages {
+			return nil, fmt.Errorf("page range %q is outside 1-%d", part, totalPages)
+		}
+		for page := start; page <= end; page++ {
+			if !seen[page] {
+				seen[page] = true
+				pages = append(pages, page)
+			}
+		}
+	}
+	return pages, nil
+}
+
+// The page-aware extraction below uses the same positional rows as the
+// generic PDF reader, but keeps page boundaries so callers can target pages
+// or search with context.
+func readPDFPages(body []byte, pageSpec, query string, contextLines, maxResults int) (string, error) {
+	reader, err := pdf.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse PDF: %w", err)
+	}
+	selected, err := parsePDFPageSpec(pageSpec, reader.NumPage())
+	if err != nil {
+		return "", err
+	}
+	pages := make([]string, reader.NumPage())
+	for _, pageNumber := range selected {
+		pages[pageNumber-1] = extractPDFPage(reader.Page(pageNumber))
+	}
+	return formatPDFPages(pages, selected, query, contextLines, maxResults), nil
+}
+
+func fetchPDF(ctx context.Context, client *http.Client, urlStr string) ([]byte, error) {
+	req, err := newRequest(ctx, urlStr, "application/pdf")
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+	}
+	body, err := io.ReadAll(limitedBody(resp.Body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read PDF response body: %w", err)
+	}
+	if !isPDFResponse(resp.Header.Get("Content-Type"), urlStr) && !bytes.HasPrefix(body, []byte("%PDF-")) {
+		return nil, fmt.Errorf("response is not a PDF")
+	}
+	return body, nil
+}
+
+// ReadPDF fetches a PDF and returns either selected pages or query matches.
+// pageSpec uses 1-based ranges such as "1-3,17". An empty pageSpec searches
+// the whole document; callers should provide a query or page selection to
+// avoid requesting an entire large document.
+func ReadPDF(ctx context.Context, urlStr, pageSpec, query string, contextLines, maxResults int) (string, error) {
+	parsedURL, err := validateURL(urlStr)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(pageSpec) == "" && strings.TrimSpace(query) == "" {
+		return "", fmt.Errorf("one of pages or query is required")
+	}
+	if contextLines < 0 {
+		return "", fmt.Errorf("context must not be negative")
+	}
+	if maxResults <= 0 {
+		return "", fmt.Errorf("max_results must be positive")
+	}
+	body, err := fetchPDF(ctx, newHTTPClient(), parsedURL.String())
+	if err != nil {
+		return "", err
+	}
+	return readPDFPages(body, pageSpec, query, contextLines, maxResults)
 }
 
 func pdfRows(page pdf.Page) [][]pdf.Text {

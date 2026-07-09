@@ -19,7 +19,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Two entry points share one `search.Service`:
 
 - **CLI** (`cmd/`, `cobra` + `viper`): `search QUERY`, `read URL`, `serve` (MCP stdio), `version`.
-- **MCP server** (`cmd/serve.go`): exposes `search` and `web_read` tools, transport is stdio.
+- **MCP server** (`cmd/serve.go`): exposes `search`, `web_read`, and targeted `read_pdf` tools, transport is stdio.
 
 `main.go` just calls `cmd.Execute()`. The `version` var is overridden at build via `-ldflags "-X main.version=..."` (GoReleaser does this).
 

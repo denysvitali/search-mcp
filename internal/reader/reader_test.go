@@ -88,6 +88,37 @@ func TestReadPDFExtractsText(t *testing.T) {
 	}
 }
 
+func TestReadPDFSelectsPagesAndSearches(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		_, _ = w.Write(testPDF("first line\nneedle on this line\nlast line"))
+	}))
+	defer server.Close()
+
+	out, err := ReadPDF(context.Background(), server.URL, "1", "needle", 1, 10)
+	if err != nil {
+		t.Fatalf("read PDF: %v", err)
+	}
+	for _, want := range []string{"## Page 1", "needle on this line", "first line", "last line"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q: %q", want, out)
+		}
+	}
+}
+
+func TestParsePDFPageSpec(t *testing.T) {
+	pages, err := parsePDFPageSpec("1-3,2,5", 5)
+	if err != nil {
+		t.Fatalf("parse page spec: %v", err)
+	}
+	if got, want := fmt.Sprint(pages), "[1 2 3 5]"; got != want {
+		t.Errorf("pages = %s, want %s", got, want)
+	}
+	if _, err := parsePDFPageSpec("0", 5); err == nil {
+		t.Error("expected invalid page error")
+	}
+}
+
 func TestReadQuectelPDF(t *testing.T) {
 	if os.Getenv("SEARCH_MCP_LIVE_PDF_TESTS") != "1" {
 		t.Skip("set SEARCH_MCP_LIVE_PDF_TESTS=1 to run live PDF regression tests")
@@ -105,6 +136,13 @@ func TestReadQuectelPDF(t *testing.T) {
 	}
 	if strings.HasPrefix(out, "%PDF-") || strings.Contains(out, "FlateDecode") {
 		t.Fatal("Quectel PDF output contains binary PDF data")
+	}
+	matched, err := ReadPDF(context.Background(), url, "", "AT+QNWINFO", 1, 3)
+	if err != nil {
+		t.Fatalf("search Quectel PDF: %v", err)
+	}
+	if !strings.Contains(matched, "## Page ") || !strings.Contains(matched, "AT+") {
+		t.Fatalf("search output did not include a page-numbered match: %q", matched)
 	}
 }
 

@@ -41,9 +41,10 @@ otel_endpoint: ""
 
 Each provider is wrapped with resilience decorators: transient failures (HTTP 429 / `ErrRateLimited`) are retried with exponential backoff up to `retry_max_attempts`; repeated failures trip a per-provider circuit breaker (`breaker_threshold` / `breaker_cooldown`); and successful responses are cached in-memory when `cache_ttl > 0`. On top of that, `search` performs automatic **fallback**: if the selected provider is rate-limited or blocked by an anti-bot challenge, the remaining providers are tried in order until one succeeds.
 
-The MCP server exposes two tools:
+The MCP server exposes three tools:
 
 - `search` — run a query through one of the providers above (with automatic fallback).
 - `web_read` — fetch a URL and return Markdown. Several hosts are pulled through their native APIs and rendered as structured Markdown: GitHub repos / issues / pull-requests, Reddit comment threads, Hacker News items, Stack Overflow questions, and arXiv abstracts. Everything else is fetched as HTML and converted via `html-to-markdown`.
+- `read_pdf` — fetch a PDF and return selected page ranges or case-insensitive search matches with page numbers and optional line context. It never returns PDF bytes.
 
 Set `--otel --otel-exporter otlp` to export traces and metrics through the OpenTelemetry OTLP HTTP exporters. Standard OTEL environment variables such as `OTEL_EXPORTER_OTLP_ENDPOINT` are honored by the exporter packages.
