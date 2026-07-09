@@ -1,7 +1,9 @@
 package reader
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -67,6 +69,58 @@ func TestReadNonHTMLReturnsRawBody(t *testing.T) {
 	if out != "plain body" {
 		t.Errorf("out = %q, want plain body", out)
 	}
+}
+
+func TestReadPDFExtractsText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		_, _ = w.Write(testPDF("PDF text survives extraction"))
+	}))
+	defer server.Close()
+
+	out, err := Read(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if out != "PDF text survives extraction" {
+		t.Errorf("out = %q, want extracted text", out)
+	}
+}
+
+func TestReadRejectsBinaryResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write([]byte("\x00\x01binary"))
+	}))
+	defer server.Close()
+
+	if _, err := Read(context.Background(), server.URL); err == nil || !strings.Contains(err.Error(), "binary response") {
+		t.Fatalf("read error = %v, want binary response error", err)
+	}
+}
+
+func testPDF(text string) []byte {
+	objects := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len("BT /F1 12 Tf 72 720 Td ("+text+") Tj ET"), "BT /F1 12 Tf 72 720 Td ("+text+") Tj ET"),
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+	}
+	var body bytes.Buffer
+	body.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objects)+1)
+	for i, object := range objects {
+		offsets[i+1] = body.Len()
+		fmt.Fprintf(&body, "%d 0 obj\n%s\nendobj\n", i+1, object)
+	}
+	xref := body.Len()
+	fmt.Fprintf(&body, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	for _, offset := range offsets[1:] {
+		fmt.Fprintf(&body, "%010d 00000 n \n", offset)
+	}
+	fmt.Fprintf(&body, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
+	return body.Bytes()
 }
 
 func TestReadPropagatesHTTPError(t *testing.T) {

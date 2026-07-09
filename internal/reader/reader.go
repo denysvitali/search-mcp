@@ -4,6 +4,7 @@
 package reader
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -14,11 +15,13 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
 	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/base"
 	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/commonmark"
 	"github.com/PuerkitoBio/goquery"
+	"github.com/dslipak/pdf"
 )
 
 const (
@@ -198,10 +201,20 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 	}
 
 	contentType := resp.Header.Get("Content-Type")
+	if isPDFResponse(contentType, urlStr) {
+		body, err := io.ReadAll(limitedBody(resp.Body))
+		if err != nil {
+			return "", fmt.Errorf("failed to read PDF response body: %w", err)
+		}
+		return extractPDFText(body)
+	}
 	if !strings.Contains(contentType, "text/html") && !strings.Contains(contentType, "application/xhtml") {
 		body, err := io.ReadAll(limitedBody(resp.Body))
 		if err != nil {
 			return "", fmt.Errorf("failed to read response body: %w", err)
+		}
+		if isBinaryResponse(contentType, body) {
+			return "", fmt.Errorf("refusing to return binary response (%s)", contentType)
 		}
 		return string(body), nil
 	}
@@ -231,6 +244,55 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 	}
 
 	return cleanMarkdown(markdown), nil
+}
+
+func isPDFResponse(contentType, urlStr string) bool {
+	mediaType := strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
+	return strings.EqualFold(mediaType, "application/pdf") ||
+		strings.HasSuffix(strings.ToLower(strings.SplitN(urlStr, "?", 2)[0]), ".pdf")
+}
+
+func extractPDFText(body []byte) (string, error) {
+	reader, err := pdf.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse PDF: %w", err)
+	}
+	textReader, err := reader.GetPlainText()
+	if err != nil {
+		return "", fmt.Errorf("failed to extract PDF text: %w", err)
+	}
+	text, err := io.ReadAll(textReader)
+	if err != nil {
+		return "", fmt.Errorf("failed to read extracted PDF text: %w", err)
+	}
+	return cleanMarkdown(string(text)), nil
+}
+
+func isBinaryResponse(contentType string, body []byte) bool {
+	mediaType := strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
+	lowerMediaType := strings.ToLower(mediaType)
+	if strings.HasPrefix(lowerMediaType, "image/") ||
+		strings.HasPrefix(lowerMediaType, "audio/") ||
+		strings.HasPrefix(lowerMediaType, "video/") ||
+		(lowerMediaType == "application/octet-stream") ||
+		(strings.HasPrefix(lowerMediaType, "application/") && !isTextApplication(lowerMediaType)) {
+		return true
+	}
+	return bytes.IndexByte(body, 0) >= 0 || !utf8.Valid(body)
+}
+
+func isTextApplication(mediaType string) bool {
+	return strings.HasSuffix(mediaType, "+json") ||
+		strings.HasSuffix(mediaType, "+xml") ||
+		strings.HasSuffix(mediaType, "+yaml") ||
+		strings.Contains(mediaType, "json") ||
+		strings.Contains(mediaType, "javascript") ||
+		strings.Contains(mediaType, "xml") ||
+		strings.Contains(mediaType, "yaml") ||
+		strings.Contains(mediaType, "toml") ||
+		strings.Contains(mediaType, "x-www-form-urlencoded") ||
+		strings.Contains(mediaType, "graphql") ||
+		strings.Contains(mediaType, "sql")
 }
 
 func pathSegments(path string) []string {
