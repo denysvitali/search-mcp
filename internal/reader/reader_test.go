@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 )
@@ -84,6 +85,26 @@ func TestReadPDFExtractsText(t *testing.T) {
 	}
 	if out != "PDF text survives extraction" {
 		t.Errorf("out = %q, want extracted text", out)
+	}
+}
+
+func TestReadQuectelPDF(t *testing.T) {
+	if os.Getenv("SEARCH_MCP_LIVE_PDF_TESTS") != "1" {
+		t.Skip("set SEARCH_MCP_LIVE_PDF_TESTS=1 to run live PDF regression tests")
+	}
+
+	const url = "https://quectel.com/content/uploads/2021/03/Quectel_BG95BG77BG600L_Series_AT_Commands_Manual_V2.0-2.pdf"
+	out, err := Read(context.Background(), url)
+	if err != nil {
+		t.Fatalf("read Quectel PDF: %v", err)
+	}
+	for _, want := range []string{"AT Commands Manual", "AT+"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Quectel PDF output is missing %q", want)
+		}
+	}
+	if strings.HasPrefix(out, "%PDF-") || strings.Contains(out, "FlateDecode") {
+		t.Fatal("Quectel PDF output contains binary PDF data")
 	}
 }
 

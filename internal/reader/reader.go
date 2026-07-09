@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -257,15 +258,67 @@ func extractPDFText(body []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to parse PDF: %w", err)
 	}
-	textReader, err := reader.GetPlainText()
-	if err != nil {
-		return "", fmt.Errorf("failed to extract PDF text: %w", err)
+
+	var text strings.Builder
+	for page := 1; page <= reader.NumPage(); page++ {
+		if page > 1 {
+			text.WriteString("\n")
+		}
+		for _, row := range pdfRows(reader.Page(page)) {
+			line := joinPDFRow(row)
+			if line == "" {
+				continue
+			}
+			text.WriteString(line)
+			text.WriteString("\n")
+		}
 	}
-	text, err := io.ReadAll(textReader)
-	if err != nil {
-		return "", fmt.Errorf("failed to read extracted PDF text: %w", err)
+	return cleanMarkdown(text.String()), nil
+}
+
+func pdfRows(page pdf.Page) [][]pdf.Text {
+	byY := make(map[int64][]pdf.Text)
+	for _, text := range page.Content().Text {
+		if text.S != "" {
+			byY[int64(text.Y)] = append(byY[int64(text.Y)], text)
+		}
 	}
-	return cleanMarkdown(string(text)), nil
+	rows := make([][]pdf.Text, 0, len(byY))
+	for _, row := range byY {
+		sort.SliceStable(row, func(i, j int) bool { return row[i].X < row[j].X })
+		rows = append(rows, row)
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i][0].Y > rows[j][0].Y })
+	return rows
+}
+
+// joinPDFRow keeps wide horizontal gaps as column separators. This does not
+// attempt to infer a formal table schema, but preserves enough layout for
+// tables and command/description pairs to remain readable as Markdown text.
+func joinPDFRow(row []pdf.Text) string {
+	var line strings.Builder
+	var previous pdf.Text
+	for _, text := range row {
+		if text.S == "" {
+			continue
+		}
+		if strings.TrimSpace(text.S) == "" {
+			line.WriteString(text.S)
+			previous = text
+			continue
+		}
+		if line.Len() > 0 {
+			gap := text.X - (previous.X + previous.W)
+			if gap >= 18 {
+				line.WriteString("  ")
+			} else if gap >= 4 && !strings.HasPrefix(text.S, ".") && !strings.HasPrefix(text.S, ",") {
+				line.WriteByte(' ')
+			}
+		}
+		line.WriteString(text.S)
+		previous = text
+	}
+	return strings.TrimSpace(line.String())
 }
 
 func isBinaryResponse(contentType string, body []byte) bool {
