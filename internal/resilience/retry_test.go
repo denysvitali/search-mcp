@@ -155,3 +155,49 @@ func TestRetry_DefaultBackoffWithinRange(t *testing.T) {
 		}
 	}
 }
+
+func TestRetry_HonorsRetryAfterHint(t *testing.T) {
+	rateLimited := fmt.Errorf("mojeek: %w", &search.RateLimitedError{RetryAfter: 7 * time.Second})
+	stub := &stubProvider{errs: []error{rateLimited, nil}}
+
+	var slept []time.Duration
+	r := NewRetryProvider(stub, RetryOptions{
+		MaxAttempts: 3,
+		BaseDelay:   time.Millisecond,
+		sleep: func(ctx context.Context, d time.Duration) error {
+			slept = append(slept, d)
+			return ctx.Err()
+		},
+		jitter: func(d time.Duration) time.Duration { return d },
+	})
+
+	if _, err := r.Search(context.Background(), search.Request{Query: "x"}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(slept) != 1 || slept[0] != 7*time.Second {
+		t.Fatalf("slept = %v, want [7s] from Retry-After hint", slept)
+	}
+}
+
+func TestRetry_CapsHostileRetryAfter(t *testing.T) {
+	rateLimited := fmt.Errorf("mojeek: %w", &search.RateLimitedError{RetryAfter: time.Hour})
+	stub := &stubProvider{errs: []error{rateLimited, nil}}
+
+	var slept []time.Duration
+	r := NewRetryProvider(stub, RetryOptions{
+		MaxAttempts: 2,
+		BaseDelay:   time.Millisecond,
+		sleep: func(ctx context.Context, d time.Duration) error {
+			slept = append(slept, d)
+			return ctx.Err()
+		},
+		jitter: func(d time.Duration) time.Duration { return d },
+	})
+
+	if _, err := r.Search(context.Background(), search.Request{Query: "x"}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(slept) != 1 || slept[0] != maxRetryAfterWait {
+		t.Fatalf("slept = %v, want capped %s", slept, maxRetryAfterWait)
+	}
+}

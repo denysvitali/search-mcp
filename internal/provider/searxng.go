@@ -85,7 +85,7 @@ func (s *SearXNG) Search(ctx context.Context, req search.Request) (search.Respon
 
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests:
-		return search.Response{}, fmt.Errorf("searxng returned http 429: %w", ErrRateLimited)
+		return search.Response{}, fmt.Errorf("searxng returned http 429: %w", search.NewRateLimitedError(resp.Header))
 	case resp.StatusCode == http.StatusForbidden:
 		// Instances without the json format enabled answer 403; treat it as
 		// blocked so the service can fall through to another provider.

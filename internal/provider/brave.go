@@ -94,7 +94,7 @@ func (b *Brave) Search(ctx context.Context, req search.Request) (search.Response
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return search.Response{}, fmt.Errorf("brave returned http 429: %w", ErrRateLimited)
+		return search.Response{}, fmt.Errorf("brave returned http 429: %w", search.NewRateLimitedError(resp.Header))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return search.Response{}, fmt.Errorf("brave search failed: %s", resp.Status)

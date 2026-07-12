@@ -65,7 +65,7 @@ func (m *Mojeek) Search(ctx context.Context, req search.Request) (search.Respons
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return search.Response{}, fmt.Errorf("mojeek returned http 429; back off and retry later: %w", ErrRateLimited)
+		return search.Response{}, fmt.Errorf("mojeek returned http 429; back off and retry later: %w", search.NewRateLimitedError(resp.Header))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return search.Response{}, fmt.Errorf("mojeek search failed: status %d", resp.StatusCode)

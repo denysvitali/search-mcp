@@ -9,6 +9,10 @@ import (
 	"github.com/denysvitali/search-mcp/internal/search"
 )
 
+// maxRetryAfterWait caps how long a server-advised Retry-After can make a
+// single backoff sleep.
+const maxRetryAfterWait = 30 * time.Second
+
 // RetryOptions configures RetryProvider.
 type RetryOptions struct {
 	// MaxAttempts is the total number of attempts (including the first). Values
@@ -85,6 +89,12 @@ func (r *RetryProvider) Search(ctx context.Context, req search.Request) (search.
 		}
 
 		delay := r.backoff(attempt)
+		// A server-advised Retry-After beats the blind exponential guess,
+		// capped so a hostile header cannot stall the caller.
+		var rateLimited *search.RateLimitedError
+		if errors.As(err, &rateLimited) && rateLimited.RetryAfter > 0 {
+			delay = min(rateLimited.RetryAfter, maxRetryAfterWait)
+		}
 		if err := r.sleepCtx(ctx, delay); err != nil {
 			// Context expired during backoff: return the last provider error so
 			// callers can classify it, falling back to the ctx error otherwise.
