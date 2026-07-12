@@ -47,6 +47,7 @@ func init() {
 	rootCmd.PersistentFlags().String("brave-endpoint", "", "Brave Search API endpoint")
 	rootCmd.PersistentFlags().String("duckduckgo-endpoint", "", "DuckDuckGo HTML search endpoint")
 	rootCmd.PersistentFlags().String("mojeek-endpoint", "", "Mojeek search HTML endpoint")
+	rootCmd.PersistentFlags().String("searxng-url", "", "SearXNG instance URL (enables the searxng provider)")
 	rootCmd.PersistentFlags().Float64("rate-rps", 1, "requests per second per provider")
 	rootCmd.PersistentFlags().Int("rate-burst", 2, "rate limit burst per provider")
 	rootCmd.PersistentFlags().Int("retry-max-attempts", 3, "max attempts per provider on transient failures")
@@ -66,6 +67,7 @@ func init() {
 	_ = viper.BindPFlag("brave_endpoint", rootCmd.PersistentFlags().Lookup("brave-endpoint"))
 	_ = viper.BindPFlag("duckduckgo_endpoint", rootCmd.PersistentFlags().Lookup("duckduckgo-endpoint"))
 	_ = viper.BindPFlag("mojeek_endpoint", rootCmd.PersistentFlags().Lookup("mojeek-endpoint"))
+	_ = viper.BindPFlag("searxng_url", rootCmd.PersistentFlags().Lookup("searxng-url"))
 	_ = viper.BindPFlag("rate_rps", rootCmd.PersistentFlags().Lookup("rate-rps"))
 	_ = viper.BindPFlag("rate_burst", rootCmd.PersistentFlags().Lookup("rate-burst"))
 	_ = viper.BindPFlag("retry_max_attempts", rootCmd.PersistentFlags().Lookup("retry-max-attempts"))
@@ -149,6 +151,13 @@ func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
 			return nil, fmt.Errorf("brave provider: %w", err)
 		}
 		providers = append(providers, resilience.Wrap(brave, resilienceCfg))
+	}
+	if viper.GetString("searxng_url") != "" {
+		searxng, err := provider.NewSearXNGChecked(viper.GetString("searxng_url"))
+		if err != nil {
+			return nil, fmt.Errorf("searxng provider: %w", err)
+		}
+		providers = append(providers, resilience.Wrap(searxng, resilienceCfg))
 	}
 	return search.NewService(providers, viper.GetFloat64("rate_rps"), viper.GetInt("rate_burst"), logger)
 }
