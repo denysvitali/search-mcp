@@ -34,7 +34,7 @@ func SetPageCacheDir(dir string) {
 	if dir == "" {
 		return
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return
 	}
 	webPageCache.dir = dir
@@ -90,7 +90,7 @@ func (c *pageCache) persist(url string, entry *pageCacheEntry) {
 	}
 	target := cachePath(c.dir, url)
 	tmp := target + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return
 	}
 	if err := os.Rename(tmp, target); err != nil {
@@ -122,7 +122,9 @@ func pruneDiskCache(dir string) {
 			continue
 		}
 		path := filepath.Join(dir, file.Name())
-		if data, err := os.ReadFile(path); err == nil {
+		// The path is built from the configured cache dir and a ReadDir entry,
+		// not caller input.
+		if data, err := os.ReadFile(path); err == nil { //nolint:gosec // see above
 			var stored diskCacheEntry
 			if json.Unmarshal(data, &stored) == nil && now.After(stored.Expires) {
 				_ = os.Remove(path)
