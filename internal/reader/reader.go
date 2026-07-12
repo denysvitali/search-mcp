@@ -203,9 +203,21 @@ func limitedBody(r io.Reader) io.Reader {
 }
 
 func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr string) (string, error) {
+	if content, ok := webPageCache.getFresh(urlStr); ok {
+		return content, nil
+	}
+
 	req, err := newRequest(ctx, urlStr, defaultAccept)
 	if err != nil {
 		return "", err
+	}
+	// Revalidate a stale cached copy instead of re-downloading it.
+	etag, lastModified := webPageCache.validators(urlStr)
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+	if lastModified != "" {
+		req.Header.Set("If-Modified-Since", lastModified)
 	}
 
 	resp, err := client.Do(req)
@@ -214,8 +226,21 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotModified {
+		if content, ok := webPageCache.refresh(urlStr); ok {
+			return content, nil
+		}
+		return "", fmt.Errorf("server answered 304 but no cached copy exists")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
+	}
+
+	// cache stores the rendered content along with the response validators so
+	// the next stale hit can revalidate with a conditional GET.
+	cache := func(content string) (string, error) {
+		webPageCache.store(urlStr, content, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"))
+		return content, nil
 	}
 
 	contentType := resp.Header.Get("Content-Type")
@@ -224,7 +249,11 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 		if err != nil {
 			return "", fmt.Errorf("failed to read PDF response body: %w", err)
 		}
-		return extractPDFText(body)
+		text, err := extractPDFText(body)
+		if err != nil {
+			return "", err
+		}
+		return cache(text)
 	}
 	if !strings.Contains(contentType, "text/html") && !strings.Contains(contentType, "application/xhtml") {
 		body, err := io.ReadAll(limitedBody(resp.Body))
@@ -235,12 +264,12 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 			return "", fmt.Errorf("refusing to return binary response (%s)", contentType)
 		}
 		if markdown, ok := renderFeed(contentType, body); ok {
-			return markdown, nil
+			return cache(markdown)
 		}
 		if pretty, ok := prettyJSON(contentType, body); ok {
-			return pretty, nil
+			return cache(pretty)
 		}
-		return string(body), nil
+		return cache(string(body))
 	}
 
 	body, err := io.ReadAll(limitedBody(resp.Body))
@@ -252,7 +281,7 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 	// other boilerplate, typically shrinking the Markdown dramatically. Pages
 	// it cannot confidently extract fall back to full-page conversion.
 	if markdown, ok := readableMarkdown(body, urlStr); ok {
-		return markdown, nil
+		return cache(markdown)
 	}
 
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
@@ -273,7 +302,7 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 		return "", err
 	}
 
-	return cleanMarkdown(markdown), nil
+	return cache(cleanMarkdown(markdown))
 }
 
 // minReadableTextLength is the smallest extracted-article text size that we

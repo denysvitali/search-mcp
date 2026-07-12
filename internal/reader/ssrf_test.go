@@ -18,6 +18,9 @@ import (
 func TestMain(m *testing.M) {
 	allowPrivateHosts = true
 	waybackAvailabilityBaseURL = "http://127.0.0.1:1/wayback/available"
+	// Disable the page cache by default so tests never see stale content from
+	// a recycled httptest port; cache tests re-enable it locally.
+	SetPageCacheTTL(0)
 	os.Exit(m.Run())
 }
 
