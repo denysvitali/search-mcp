@@ -3,6 +3,7 @@ package main_test
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -84,6 +85,73 @@ func TestIntegrationMCPWebSearchTool(t *testing.T) {
 	var resp searchResponse
 	if err := json.Unmarshal([]byte(text), &resp); err != nil {
 		t.Fatalf("decode tool result: %v\n%s", err, text)
+	}
+	assertSearchResponse(t, resp)
+}
+
+func TestIntegrationMCPHTTPTransport(t *testing.T) {
+	binary := buildBinary(t)
+	mockSearch := newDuckDuckGoMock(t)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	addr := listener.Addr().String()
+	_ = listener.Close()
+
+	serverCmd := exec.Command(binary, "serve", "--http", addr)
+	serverCmd.Env = append(os.Environ(), "SEARCH_MCP_DUCKDUCKGO_ENDPOINT="+mockSearch.URL)
+	if err := serverCmd.Start(); err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = serverCmd.Process.Kill()
+		_, _ = serverCmd.Process.Wait()
+	})
+
+	// Wait for the HTTP listener to come up.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not listen on %s: %v", addr, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "integration-test", Version: "1.0.0"}, nil)
+	session, err := mcpClient.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: "http://" + addr}, nil)
+	if err != nil {
+		t.Fatalf("connect over http: %v", err)
+	}
+	defer session.Close()
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query":    "integration query",
+			"provider": "duckduckgo",
+			"count":    2,
+		},
+	})
+	if err != nil {
+		t.Fatalf("call search: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("search returned error: %#v", result.Content)
+	}
+
+	var resp searchResponse
+	if err := json.Unmarshal([]byte(toolText(t, result)), &resp); err != nil {
+		t.Fatalf("decode tool result: %v", err)
 	}
 	assertSearchResponse(t, resp)
 }

@@ -3,7 +3,9 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -330,7 +332,7 @@ func valueOrDefault(v, def string) string {
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
-	Short: "Run the MCP stdio server",
+	Short: "Run the MCP server (stdio by default, streamable HTTP with --http)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
@@ -354,6 +356,10 @@ var serveCmd = &cobra.Command{
 
 		s := newMCPServer(service)
 
+		if addr := viper.GetString("http"); addr != "" {
+			return serveHTTP(ctx, s, addr)
+		}
+
 		// Run the stdio server with the signal-aware context so SIGINT/SIGTERM
 		// trigger a clean shutdown.
 		if err := s.Run(ctx, &mcp.StdioTransport{}); err != nil && ctx.Err() == nil {
@@ -361,6 +367,37 @@ var serveCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+func init() {
+	serveCmd.Flags().String("http", "", "listen address for the streamable HTTP transport (e.g. :8080); empty uses stdio")
+	_ = viper.BindPFlag("http", serveCmd.Flags().Lookup("http"))
+}
+
+// serveHTTP exposes the MCP server over the streamable HTTP transport until
+// ctx is cancelled.
+func serveHTTP(ctx context.Context, s *mcp.Server, addr string) error {
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil)
+	httpServer := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- httpServer.ListenAndServe() }()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return httpServer.Shutdown(shutdownCtx)
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	}
 }
 
 func clampPDFNumber(value, maximum int, name string) (int, error) {
