@@ -8,9 +8,11 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/denysvitali/search-mcp/internal/observability"
 	"github.com/denysvitali/search-mcp/internal/reader"
+	"github.com/denysvitali/search-mcp/internal/resilience"
 	searchdomain "github.com/denysvitali/search-mcp/internal/search"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
@@ -26,6 +28,8 @@ const (
 	toolWebRead = "web_read"
 	// toolReadPDF is the MCP tool name for targeted PDF extraction.
 	toolReadPDF = "read_pdf"
+	// toolProviderStatus is the MCP tool name for provider health inspection.
+	toolProviderStatus = "provider_status"
 
 	// maxResultCount caps the requested result count to a sane upper bound.
 	maxResultCount = 100
@@ -101,6 +105,41 @@ func runBatchSearch(ctx context.Context, service *searchdomain.Service, queries 
 			continue
 		}
 		result.Responses = append(result.Responses, o.resp)
+	}
+	return result
+}
+
+// providerStatus reports one provider's health.
+type providerStatus struct {
+	Name                string  `json:"name"`
+	Breaker             string  `json:"breaker"`
+	ConsecutiveFailures int     `json:"consecutive_failures"`
+	CooldownRemaining   string  `json:"cooldown_remaining,omitempty"`
+	RateLimitTokens     float64 `json:"rate_limit_tokens"`
+}
+
+type providerStatusResult struct {
+	Providers []providerStatus `json:"providers"`
+}
+
+// collectProviderStatus snapshots breaker state and rate-limit headroom for
+// every configured provider.
+func collectProviderStatus(service *searchdomain.Service) providerStatusResult {
+	result := providerStatusResult{}
+	for _, name := range service.ProviderNames() {
+		status := providerStatus{Name: name, Breaker: "unknown"}
+		if breaker := resilience.FindBreaker(service.Provider(name)); breaker != nil {
+			snapshot := breaker.Status()
+			status.Breaker = snapshot.State
+			status.ConsecutiveFailures = snapshot.ConsecutiveFailures
+			if snapshot.CooldownRemaining > 0 {
+				status.CooldownRemaining = snapshot.CooldownRemaining.Round(time.Millisecond).String()
+			}
+		}
+		if tokens, ok := service.RateLimitTokens(name); ok {
+			status.RateLimitTokens = tokens
+		}
+		result.Providers = append(result.Providers, status)
 	}
 	return result
 }
@@ -243,6 +282,19 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 			return nil, nil, err
 		}
 		return textResult(content), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        toolProviderStatus,
+		Description: "Report the health of every configured search provider: circuit-breaker state, consecutive failures, cooldown remaining, and rate-limit headroom. Use it to pick a healthy provider explicitly.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, providerStatusResult, error) {
+		result := collectProviderStatus(service)
+		data, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return nil, providerStatusResult{}, err
+		}
+		return textResult(string(data)), result, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{

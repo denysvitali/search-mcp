@@ -80,6 +80,23 @@ func (s *Service) ProviderNames() []string {
 	return names
 }
 
+// Provider returns the configured provider by name, or nil when unknown.
+// Callers use it to inspect decorator state (e.g. circuit breakers).
+func (s *Service) Provider(name string) Provider {
+	return s.providers[name]
+}
+
+// RateLimitTokens reports the current token count of the provider's rate
+// limiter. Fractional tokens are possible; values below 1 mean the next call
+// will wait.
+func (s *Service) RateLimitTokens(name string) (float64, bool) {
+	limiter, ok := s.limiters[name]
+	if !ok {
+		return 0, false
+	}
+	return limiter.Tokens(), true
+}
+
 func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 	ctx, span := s.tracer.Start(ctx, "search")
 	defer span.End()

@@ -121,6 +121,25 @@ func TestRunBatchSearch(t *testing.T) {
 	}
 }
 
+func TestCollectProviderStatus(t *testing.T) {
+	svc, err := newSearchService(logrus.New())
+	if err != nil {
+		t.Fatalf("newSearchService: %v", err)
+	}
+	result := collectProviderStatus(svc)
+	if len(result.Providers) < 2 {
+		t.Fatalf("providers = %d, want at least duckduckgo and mojeek", len(result.Providers))
+	}
+	for _, p := range result.Providers {
+		if p.Breaker != "closed" {
+			t.Errorf("provider %s breaker = %q, want closed", p.Name, p.Breaker)
+		}
+		if p.RateLimitTokens <= 0 {
+			t.Errorf("provider %s tokens = %v, want > 0", p.Name, p.RateLimitTokens)
+		}
+	}
+}
+
 // TestInitConfig_IgnoresCwdConfig verifies that a search-mcp.yaml in the
 // current working directory is NOT picked up by initConfig. This prevents
 // running search-mcp from inside another project (e.g. one with its own
