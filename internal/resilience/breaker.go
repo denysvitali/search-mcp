@@ -64,11 +64,13 @@ func NewCircuitBreaker(inner search.Provider, opts BreakerOptions) *CircuitBreak
 	if opts.now == nil {
 		opts.now = time.Now
 	}
-	return &CircuitBreaker{
+	breaker := &CircuitBreaker{
 		inner: inner,
 		opts:  opts,
 		state: stateClosed,
 	}
+	recordBreakerState(inner.Name(), "closed")
+	return breaker
 }
 
 // Name delegates to the inner provider.
@@ -99,6 +101,7 @@ func (c *CircuitBreaker) beforeCall() error {
 			// Transition to half-open and let this single call be the trial.
 			c.state = stateHalfOpen
 			c.halfOpenBusy = true
+			recordBreakerTransition(c.inner.Name(), "half-open")
 			return nil
 		}
 		return fmt.Errorf("%s: %w", c.inner.Name(), ErrCircuitOpen)
@@ -125,6 +128,9 @@ func (c *CircuitBreaker) afterCall(err error) {
 
 	if err == nil {
 		// Success closes the breaker and resets the failure count.
+		if c.state != stateClosed {
+			recordBreakerTransition(c.inner.Name(), "closed")
+		}
 		c.state = stateClosed
 		c.failures = 0
 		return
@@ -135,11 +141,13 @@ func (c *CircuitBreaker) afterCall(err error) {
 		// Trial failed: re-open and restart the cooldown.
 		c.state = stateOpen
 		c.openedAt = c.opts.now()
+		recordBreakerTransition(c.inner.Name(), "open")
 	default: // stateClosed
 		c.failures++
 		if c.failures >= c.opts.Threshold {
 			c.state = stateOpen
 			c.openedAt = c.opts.now()
+			recordBreakerTransition(c.inner.Name(), "open")
 		}
 	}
 }

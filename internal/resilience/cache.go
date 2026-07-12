@@ -72,8 +72,10 @@ func (p *CachingProvider) Search(ctx context.Context, req search.Request) (searc
 	key := cacheKey(req)
 
 	if resp, ok := p.get(key); ok {
+		recordCacheEvent(ctx, p.Name(), "hit")
 		return resp, nil
 	}
+	recordCacheEvent(ctx, p.Name(), "miss")
 
 	resp, err := p.inner.Search(ctx, req)
 	if err != nil {

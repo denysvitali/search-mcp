@@ -146,3 +146,25 @@ func TestBreaker_NameDelegates(t *testing.T) {
 		t.Fatalf("want mojeek, got %q", b.Name())
 	}
 }
+
+func TestBreaker_TracksMetricState(t *testing.T) {
+	const provider = "metric-stub"
+	clk := &fakeClock{t: time.Unix(0, 0)}
+	stub := &stubProvider{name: provider, errs: []error{errors.New("boom"), nil}}
+	b := NewCircuitBreaker(stub, BreakerOptions{Threshold: 1, Cooldown: time.Second, now: clk.now})
+
+	assertMetricState := func(want int64) {
+		t.Helper()
+		got, ok := metrics.states.Load(provider)
+		if !ok || got != want {
+			t.Fatalf("metric state: want %d, got %v (present=%v)", want, got, ok)
+		}
+	}
+
+	assertMetricState(0) // closed
+	_, _ = b.Search(context.Background(), search.Request{})
+	assertMetricState(1) // open
+	clk.advance(time.Second)
+	_, _ = b.Search(context.Background(), search.Request{})
+	assertMetricState(0) // half-open trial succeeded and closed the breaker
+}
