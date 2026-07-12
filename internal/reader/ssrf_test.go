@@ -12,9 +12,12 @@ import (
 
 // TestMain enables allowPrivateHosts for the whole reader test suite so the
 // httptest servers (bound to loopback) are reachable. Tests that exercise the
-// SSRF guard itself flip it back off locally.
+// SSRF guard itself flip it back off locally. The Wayback availability API is
+// pointed at an unroutable local port so no test ever calls the live archive;
+// tests that exercise the fallback override it with their own httptest server.
 func TestMain(m *testing.M) {
 	allowPrivateHosts = true
+	waybackAvailabilityBaseURL = "http://127.0.0.1:1/wayback/available"
 	os.Exit(m.Run())
 }
 

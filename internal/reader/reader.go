@@ -98,7 +98,7 @@ func Read(ctx context.Context, urlStr string) (string, error) {
 	if isArxivURL(parsedURL) {
 		return fetchArxivContentAsMarkdown(ctx, client, parsedURL)
 	}
-	return fetchGenericHTMLAsMarkdown(ctx, client, parsedURL.String())
+	return fetchWithWaybackFallback(ctx, client, parsedURL.String())
 }
 
 func validateURL(urlStr string) (*url.URL, error) {
@@ -215,7 +215,7 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+		return "", &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 
 	contentType := resp.Header.Get("Content-Type")
