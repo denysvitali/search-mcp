@@ -98,6 +98,10 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 		req.Provider = names[0]
 	}
 
+	if req.Provider == AllProviders {
+		return s.searchAll(ctx, span, req)
+	}
+
 	primary := req.Provider
 	if _, ok := s.providers[primary]; !ok {
 		return Response{}, fmt.Errorf("unknown provider %q", primary)

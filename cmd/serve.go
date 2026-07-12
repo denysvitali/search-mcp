@@ -36,7 +36,7 @@ const (
 // input schema from it and validates arguments before the handler runs.
 type searchArgs struct {
 	Query      string `json:"query" jsonschema:"Search query"`
-	Provider   string `json:"provider,omitempty" jsonschema:"Provider name: duckduckgo, mojeek, brave, or searxng"`
+	Provider   string `json:"provider,omitempty" jsonschema:"Provider name: duckduckgo, mojeek, brave, searxng, or all to fan out to every provider and merge rankings"`
 	Count      *int   `json:"count,omitempty" jsonschema:"Maximum number of results"`
 	Country    string `json:"country,omitempty" jsonschema:"Provider country code"`
 	Language   string `json:"language,omitempty" jsonschema:"Provider language code"`
