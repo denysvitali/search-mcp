@@ -219,6 +219,12 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 		if isBinaryResponse(contentType, body) {
 			return "", fmt.Errorf("refusing to return binary response (%s)", contentType)
 		}
+		if markdown, ok := renderFeed(contentType, body); ok {
+			return markdown, nil
+		}
+		if pretty, ok := prettyJSON(contentType, body); ok {
+			return pretty, nil
+		}
 		return string(body), nil
 	}
 
