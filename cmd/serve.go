@@ -51,6 +51,7 @@ type webReadArgs struct {
 	Query      *string `json:"query,omitempty" jsonschema:"Optional case-insensitive text to search for in the page; returns matching lines with context instead of the full content"`
 	Context    *int    `json:"context,omitempty" jsonschema:"Lines of context around each query match, default 2, maximum 10"`
 	MaxMatches *int    `json:"max_matches,omitempty" jsonschema:"Maximum query matches to return, default 20, maximum 100"`
+	Links      *bool   `json:"links,omitempty" jsonschema:"When true, return the page's links (anchor text plus absolute URL) instead of its content"`
 }
 
 type readPDFArgs struct {
@@ -129,6 +130,13 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 		Description: "Fetch a URL and return its content as Markdown. GitHub repo / issue / pull-request URLs and Reddit comment threads are pulled from their JSON APIs; everything else is fetched as HTML and converted. Use max_length/start_index for chunked reads of long pages, or query to grep within the page.",
 		Annotations: readOnlyOpenWorld(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args webReadArgs) (*mcp.CallToolResult, any, error) {
+		if args.Links != nil && *args.Links {
+			content, err := reader.ExtractLinks(ctx, args.URL)
+			if err != nil {
+				return nil, nil, err
+			}
+			return textResult(content), nil, nil
+		}
 		var query string
 		if args.Query != nil {
 			query = *args.Query
