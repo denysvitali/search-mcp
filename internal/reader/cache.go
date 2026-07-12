@@ -24,6 +24,9 @@ type pageCache struct {
 	mu      sync.Mutex
 	ttl     time.Duration
 	entries map[string]*pageCacheEntry
+	// dir, when non-empty, persists entries to disk so the cache survives
+	// process restarts.
+	dir string
 }
 
 // webPageCache caches rendered Markdown per URL so repeated reads of the same
@@ -42,6 +45,19 @@ func SetPageCacheTTL(ttl time.Duration) {
 	webPageCache.entries = make(map[string]*pageCacheEntry)
 }
 
+// lookup returns the in-memory entry, falling back to the disk store (which
+// may hold a stale entry whose validators still enable a conditional GET).
+// Caller must hold c.mu.
+func (c *pageCache) lookup(url string) (*pageCacheEntry, bool) {
+	if entry, ok := c.entries[url]; ok {
+		return entry, true
+	}
+	if entry := c.loadFromDisk(url); entry != nil {
+		return entry, true
+	}
+	return nil, false
+}
+
 // getFresh returns cached content that is still within its TTL.
 func (c *pageCache) getFresh(url string) (string, bool) {
 	c.mu.Lock()
@@ -49,7 +65,7 @@ func (c *pageCache) getFresh(url string) (string, bool) {
 	if c.ttl <= 0 {
 		return "", false
 	}
-	entry, ok := c.entries[url]
+	entry, ok := c.lookup(url)
 	if !ok || time.Now().After(entry.expires) {
 		return "", false
 	}
@@ -64,7 +80,7 @@ func (c *pageCache) validators(url string) (etag, lastModified string) {
 	if c.ttl <= 0 {
 		return "", ""
 	}
-	if entry, ok := c.entries[url]; ok {
+	if entry, ok := c.lookup(url); ok {
 		return entry.etag, entry.lastModified
 	}
 	return "", ""
@@ -75,11 +91,15 @@ func (c *pageCache) validators(url string) (etag, lastModified string) {
 func (c *pageCache) refresh(url string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	entry, ok := c.entries[url]
-	if !ok || c.ttl <= 0 {
+	if c.ttl <= 0 {
+		return "", false
+	}
+	entry, ok := c.lookup(url)
+	if !ok {
 		return "", false
 	}
 	entry.expires = time.Now().Add(c.ttl)
+	c.persist(url, entry)
 	return entry.content, true
 }
 
@@ -101,12 +121,14 @@ func (c *pageCache) store(url, content, etag, lastModified string) {
 			c.entries = make(map[string]*pageCacheEntry)
 		}
 	}
-	c.entries[url] = &pageCacheEntry{
+	entry := &pageCacheEntry{
 		content:      content,
 		etag:         etag,
 		lastModified: lastModified,
 		expires:      time.Now().Add(c.ttl),
 	}
+	c.entries[url] = entry
+	c.persist(url, entry)
 }
 
 // expireAll marks every entry stale; used by tests to exercise revalidation.

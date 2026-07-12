@@ -28,6 +28,7 @@ var (
 				os.Exit(0)
 			}
 			reader.SetPageCacheTTL(viper.GetDuration("web_cache_ttl"))
+			reader.SetPageCacheDir(viper.GetString("web_cache_dir"))
 			return nil
 		},
 	}
@@ -58,6 +59,7 @@ func init() {
 	rootCmd.PersistentFlags().Duration("breaker-cooldown", 30*time.Second, "open-circuit cooldown before a half-open trial")
 	rootCmd.PersistentFlags().Duration("cache-ttl", 0, "in-memory result cache TTL (0 disables caching)")
 	rootCmd.PersistentFlags().Duration("web-cache-ttl", 15*time.Minute, "in-memory web_read page cache TTL (0 disables caching)")
+	rootCmd.PersistentFlags().String("web-cache-dir", "", "directory for the persistent web_read page cache (empty disables persistence)")
 	rootCmd.PersistentFlags().Bool("otel", false, "enable stdout OpenTelemetry traces and metrics")
 	rootCmd.PersistentFlags().String("otel-exporter", "stdout", "OpenTelemetry exporter: stdout or otlp")
 	rootCmd.PersistentFlags().String("otel-endpoint", "", "OTLP exporter endpoint (overrides OTEL_EXPORTER_OTLP_ENDPOINT)")
@@ -79,6 +81,7 @@ func init() {
 	_ = viper.BindPFlag("breaker_cooldown", rootCmd.PersistentFlags().Lookup("breaker-cooldown"))
 	_ = viper.BindPFlag("cache_ttl", rootCmd.PersistentFlags().Lookup("cache-ttl"))
 	_ = viper.BindPFlag("web_cache_ttl", rootCmd.PersistentFlags().Lookup("web-cache-ttl"))
+	_ = viper.BindPFlag("web_cache_dir", rootCmd.PersistentFlags().Lookup("web-cache-dir"))
 	_ = viper.BindPFlag("otel", rootCmd.PersistentFlags().Lookup("otel"))
 	_ = viper.BindPFlag("otel_exporter", rootCmd.PersistentFlags().Lookup("otel-exporter"))
 	_ = viper.BindPFlag("otel_endpoint", rootCmd.PersistentFlags().Lookup("otel-endpoint"))
