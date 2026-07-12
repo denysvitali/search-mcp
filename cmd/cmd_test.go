@@ -14,13 +14,12 @@ import (
 func TestClampCount(t *testing.T) {
 	cases := []struct {
 		name    string
-		in      float64
+		in      int
 		want    int
 		wantErr bool
 	}{
 		{"zero", 0, 0, false},
 		{"normal", 10, 10, false},
-		{"truncates fractional", 10.9, 10, false},
 		{"at cap", maxResultCount, maxResultCount, false},
 		{"over cap clamps", 10_000, maxResultCount, false},
 		{"negative errors", -1, 0, true},

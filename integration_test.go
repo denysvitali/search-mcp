@@ -12,8 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mark3labs/mcp-go/client"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type searchResponse struct {
@@ -53,33 +52,27 @@ func TestIntegrationMCPWebSearchTool(t *testing.T) {
 	binary := buildBinary(t)
 	mockSearch := newDuckDuckGoMock(t)
 
-	mcpClient, err := client.NewStdioMCPClient(binary, []string{
-		"SEARCH_MCP_DUCKDUCKGO_ENDPOINT=" + mockSearch.URL,
-	}, "serve")
-	if err != nil {
-		t.Fatalf("start mcp client: %v", err)
-	}
-	defer mcpClient.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	initRequest := mcp.InitializeRequest{}
-	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initRequest.Params.ClientInfo = mcp.Implementation{Name: "integration-test", Version: "1.0.0"}
-	if _, err := mcpClient.Initialize(ctx, initRequest); err != nil {
-		t.Fatalf("initialize mcp client: %v", err)
-	}
+	serverCmd := exec.Command(binary, "serve")
+	serverCmd.Env = append(os.Environ(), "SEARCH_MCP_DUCKDUCKGO_ENDPOINT="+mockSearch.URL)
 
-	request := mcp.CallToolRequest{}
-	request.Params.Name = "search"
-	request.Params.Arguments = map[string]any{
-		"query":    "integration query",
-		"provider": "duckduckgo",
-		"count":    float64(2),
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "integration-test", Version: "1.0.0"}, nil)
+	session, err := mcpClient.Connect(ctx, &mcp.CommandTransport{Command: serverCmd}, nil)
+	if err != nil {
+		t.Fatalf("connect mcp client: %v", err)
 	}
+	defer session.Close()
 
-	result, err := mcpClient.CallTool(ctx, request)
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query":    "integration query",
+			"provider": "duckduckgo",
+			"count":    2,
+		},
+	})
 	if err != nil {
 		t.Fatalf("call search: %v", err)
 	}
@@ -175,7 +168,7 @@ func toolText(t *testing.T, result *mcp.CallToolResult) string {
 
 	var b strings.Builder
 	for _, content := range result.Content {
-		text, ok := content.(mcp.TextContent)
+		text, ok := content.(*mcp.TextContent)
 		if !ok {
 			continue
 		}

@@ -11,8 +11,7 @@ import (
 	"github.com/denysvitali/search-mcp/internal/observability"
 	"github.com/denysvitali/search-mcp/internal/reader"
 	searchdomain "github.com/denysvitali/search-mcp/internal/search"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -33,16 +32,134 @@ const (
 	maxPDFResults = 50
 )
 
+// searchArgs is the typed input for the search tool; the SDK derives the
+// input schema from it and validates arguments before the handler runs.
+type searchArgs struct {
+	Query      string `json:"query" jsonschema:"Search query"`
+	Provider   string `json:"provider,omitempty" jsonschema:"Provider name: duckduckgo, mojeek, or brave"`
+	Count      *int   `json:"count,omitempty" jsonschema:"Maximum number of results"`
+	Country    string `json:"country,omitempty" jsonschema:"Provider country code"`
+	Language   string `json:"language,omitempty" jsonschema:"Provider language code"`
+	SafeSearch string `json:"safe_search,omitempty" jsonschema:"Provider safe search mode"`
+	Freshness  string `json:"freshness,omitempty" jsonschema:"Provider freshness filter"`
+}
+
+type webReadArgs struct {
+	URL string `json:"url" jsonschema:"The URL to fetch"`
+}
+
+type readPDFArgs struct {
+	URL        string `json:"url" jsonschema:"The PDF URL to fetch"`
+	Pages      string `json:"pages,omitempty" jsonschema:"Optional 1-based page ranges, for example 1-3,17"`
+	Query      string `json:"query,omitempty" jsonschema:"Optional case-insensitive text to search for"`
+	Context    *int   `json:"context,omitempty" jsonschema:"Lines of context around each match, default 2, maximum 10"`
+	MaxResults *int   `json:"max_results,omitempty" jsonschema:"Maximum pages or matches to return, default 20, maximum 50"`
+}
+
 // clampCount validates and clamps an MCP-supplied result count, rejecting
-// negative values and capping absurdly large ones before casting to int.
-func clampCount(v float64) (int, error) {
+// negative values and capping absurdly large ones.
+func clampCount(v int) (int, error) {
 	if v < 0 {
-		return 0, fmt.Errorf("count must not be negative, got %v", v)
+		return 0, fmt.Errorf("count must not be negative, got %d", v)
 	}
 	if v > maxResultCount {
 		return maxResultCount, nil
 	}
-	return int(v), nil
+	return v, nil
+}
+
+// intOrDefault dereferences an optional integer argument, falling back to the
+// given default when the client omitted it.
+func intOrDefault(v *int, def int) int {
+	if v == nil {
+		return def
+	}
+	return *v
+}
+
+// readOnlyOpenWorld marks a tool as non-mutating but interacting with the
+// open web, so clients can treat calls as safe to repeat.
+func readOnlyOpenWorld() *mcp.ToolAnnotations {
+	openWorld := true
+	return &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}
+}
+
+func textResult(text string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
+}
+
+func newMCPServer(service *searchdomain.Service) *mcp.Server {
+	s := mcp.NewServer(&mcp.Implementation{Name: "search-mcp", Version: version}, nil)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        toolSearch,
+		Description: "Search the web using a configured provider.",
+		Annotations: readOnlyOpenWorld(),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchArgs) (*mcp.CallToolResult, searchdomain.Response, error) {
+		count, err := clampCount(intOrDefault(args.Count, viper.GetInt("count")))
+		if err != nil {
+			return nil, searchdomain.Response{}, err
+		}
+		resp, err := service.Search(ctx, searchdomain.Request{
+			Query:      args.Query,
+			Provider:   valueOrDefault(args.Provider, viper.GetString("provider")),
+			Count:      count,
+			Country:    valueOrDefault(args.Country, viper.GetString("country")),
+			Language:   valueOrDefault(args.Language, viper.GetString("language")),
+			SafeSearch: valueOrDefault(args.SafeSearch, viper.GetString("safe_search")),
+			Freshness:  valueOrDefault(args.Freshness, viper.GetString("freshness")),
+		})
+		if err != nil {
+			return nil, searchdomain.Response{}, err
+		}
+		data, err := json.MarshalIndent(resp, "", "  ")
+		if err != nil {
+			return nil, searchdomain.Response{}, err
+		}
+		return textResult(string(data)), resp, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        toolWebRead,
+		Description: "Fetch a URL and return its content as Markdown. GitHub repo / issue / pull-request URLs and Reddit comment threads are pulled from their JSON APIs; everything else is fetched as HTML and converted.",
+		Annotations: readOnlyOpenWorld(),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args webReadArgs) (*mcp.CallToolResult, any, error) {
+		content, err := reader.Read(ctx, args.URL)
+		if err != nil {
+			return nil, nil, err
+		}
+		return textResult(content), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        toolReadPDF,
+		Description: "Read selected pages or search a PDF and return page-numbered text. Use pages for 1-based ranges such as 1-3,17, or query to find matching text. Results never include PDF bytes.",
+		Annotations: readOnlyOpenWorld(),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args readPDFArgs) (*mcp.CallToolResult, any, error) {
+		contextLines, err := clampPDFNumber(intOrDefault(args.Context, 2), maxPDFContextLines, "context")
+		if err != nil {
+			return nil, nil, err
+		}
+		maxResults, err := clampPDFNumber(intOrDefault(args.MaxResults, 20), maxPDFResults, "max_results")
+		if err != nil {
+			return nil, nil, err
+		}
+		content, err := reader.ReadPDF(ctx, args.URL, args.Pages, args.Query, contextLines, maxResults)
+		if err != nil {
+			return nil, nil, err
+		}
+		return textResult(content), nil, nil
+	})
+
+	return s
+}
+
+// valueOrDefault returns v unless it is empty, in which case def is used.
+func valueOrDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 var serveCmd = &cobra.Command{
@@ -69,112 +186,23 @@ var serveCmd = &cobra.Command{
 			return err
 		}
 
-		s := server.NewMCPServer(
-			"search-mcp",
-			version,
-			server.WithToolCapabilities(false),
-			server.WithRecovery(),
-		)
+		s := newMCPServer(service)
 
-		tool := mcp.NewTool(toolSearch,
-			mcp.WithDescription("Search the web using a configured provider."),
-			mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
-			mcp.WithString("provider", mcp.Description("Provider name: duckduckgo, mojeek, or brave")),
-			mcp.WithNumber("count", mcp.Description("Maximum number of results")),
-			mcp.WithString("country", mcp.Description("Provider country code")),
-			mcp.WithString("language", mcp.Description("Provider language code")),
-			mcp.WithString("safe_search", mcp.Description("Provider safe search mode")),
-			mcp.WithString("freshness", mcp.Description("Provider freshness filter")),
-		)
-
-		s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			query, err := request.RequireString("query")
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			count, err := clampCount(request.GetFloat("count", float64(viper.GetInt("count"))))
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			resp, err := service.Search(ctx, searchdomain.Request{
-				Query:      query,
-				Provider:   request.GetString("provider", viper.GetString("provider")),
-				Count:      count,
-				Country:    request.GetString("country", viper.GetString("country")),
-				Language:   request.GetString("language", viper.GetString("language")),
-				SafeSearch: request.GetString("safe_search", viper.GetString("safe_search")),
-				Freshness:  request.GetString("freshness", viper.GetString("freshness")),
-			})
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			data, err := json.MarshalIndent(resp, "", "  ")
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			return mcp.NewToolResultText(string(data)), nil
-		})
-
-		readTool := mcp.NewTool(toolWebRead,
-			mcp.WithDescription("Fetch a URL and return its content as Markdown. GitHub repo / issue / pull-request URLs and Reddit comment threads are pulled from their JSON APIs; everything else is fetched as HTML and converted."),
-			mcp.WithString("url", mcp.Required(), mcp.Description("The URL to fetch")),
-		)
-		s.AddTool(readTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			urlStr, err := request.RequireString("url")
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			content, err := reader.Read(ctx, urlStr)
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			return mcp.NewToolResultText(content), nil
-		})
-
-		readPDFTool := mcp.NewTool(toolReadPDF,
-			mcp.WithDescription("Read selected pages or search a PDF and return page-numbered text. Use pages for 1-based ranges such as 1-3,17, or query to find matching text. Results never include PDF bytes."),
-			mcp.WithString("url", mcp.Required(), mcp.Description("The PDF URL to fetch")),
-			mcp.WithString("pages", mcp.Description("Optional 1-based page ranges, for example 1-3,17")),
-			mcp.WithString("query", mcp.Description("Optional case-insensitive text to search for")),
-			mcp.WithNumber("context", mcp.Description("Lines of context around each match, default 2, maximum 10")),
-			mcp.WithNumber("max_results", mcp.Description("Maximum pages or matches to return, default 20, maximum 50")),
-		)
-		s.AddTool(readPDFTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			urlStr, err := request.RequireString("url")
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			contextLines, err := clampPDFNumber(request.GetFloat("context", 2), maxPDFContextLines, "context")
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			maxResults, err := clampPDFNumber(request.GetFloat("max_results", 20), maxPDFResults, "max_results")
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			content, err := reader.ReadPDF(ctx, urlStr, request.GetString("pages", ""), request.GetString("query", ""), contextLines, maxResults)
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			return mcp.NewToolResultText(content), nil
-		})
-
-		// Drive the stdio server with the signal-aware context so SIGINT/SIGTERM
+		// Run the stdio server with the signal-aware context so SIGINT/SIGTERM
 		// trigger a clean shutdown.
-		stdio := server.NewStdioServer(s)
-		if err := stdio.Listen(ctx, os.Stdin, os.Stdout); err != nil && ctx.Err() == nil {
+		if err := s.Run(ctx, &mcp.StdioTransport{}); err != nil && ctx.Err() == nil {
 			return err
 		}
 		return nil
 	},
 }
 
-func clampPDFNumber(value float64, maximum int, name string) (int, error) {
+func clampPDFNumber(value, maximum int, name string) (int, error) {
 	if value < 0 {
-		return 0, fmt.Errorf("%s must not be negative, got %v", name, value)
+		return 0, fmt.Errorf("%s must not be negative, got %d", name, value)
 	}
-	if value > float64(maximum) {
+	if value > maximum {
 		return maximum, nil
 	}
-	return int(value), nil
+	return value, nil
 }
