@@ -498,17 +498,13 @@ func fetchPDF(ctx context.Context, client *http.Client, urlStr string) ([]byte, 
 	return body, nil
 }
 
-// ReadPDF fetches a PDF and returns either selected pages or query matches.
-// pageSpec uses 1-based ranges such as "1-3,17". An empty pageSpec searches
-// the whole document; callers should provide a query or page selection to
-// avoid requesting an entire large document.
+// ReadPDF fetches a PDF and returns selected pages, query matches, or — when
+// neither pages nor query is given — a metadata/outline summary that helps
+// the caller pick page ranges. pageSpec uses 1-based ranges such as "1-3,17".
 func ReadPDF(ctx context.Context, urlStr, pageSpec, query string, contextLines, maxResults int) (string, error) {
 	parsedURL, err := validateURL(urlStr)
 	if err != nil {
 		return "", err
-	}
-	if strings.TrimSpace(pageSpec) == "" && strings.TrimSpace(query) == "" {
-		return "", fmt.Errorf("one of pages or query is required")
 	}
 	if contextLines < 0 {
 		return "", fmt.Errorf("context must not be negative")
@@ -519,6 +515,12 @@ func ReadPDF(ctx context.Context, urlStr, pageSpec, query string, contextLines, 
 	body, err := fetchPDF(ctx, newHTTPClient(), parsedURL.String())
 	if err != nil {
 		return "", err
+	}
+	// Without a page selection or query, return metadata plus the outline so
+	// the caller can target specific pages instead of pulling the whole
+	// document.
+	if strings.TrimSpace(pageSpec) == "" && strings.TrimSpace(query) == "" {
+		return pdfSummary(body, parsedURL.String())
 	}
 	return readPDFPages(body, pageSpec, query, contextLines, maxResults)
 }

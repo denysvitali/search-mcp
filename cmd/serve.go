@@ -148,7 +148,7 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        toolReadPDF,
-		Description: "Read selected pages or search a PDF and return page-numbered text. Use pages for 1-based ranges such as 1-3,17, or query to find matching text. Results never include PDF bytes.",
+		Description: "Read selected pages or search a PDF and return page-numbered text. Use pages for 1-based ranges such as 1-3,17, or query to find matching text. With neither, returns the PDF's metadata, page count, and outline so you can target pages. Results never include PDF bytes.",
 		Annotations: readOnlyOpenWorld(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args readPDFArgs) (*mcp.CallToolResult, any, error) {
 		contextLines, err := clampPDFNumber(intOrDefault(args.Context, 2), maxPDFContextLines, "context")
