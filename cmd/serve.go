@@ -45,7 +45,12 @@ type searchArgs struct {
 }
 
 type webReadArgs struct {
-	URL string `json:"url" jsonschema:"The URL to fetch"`
+	URL        string  `json:"url" jsonschema:"The URL to fetch"`
+	MaxLength  *int    `json:"max_length,omitempty" jsonschema:"Maximum characters to return; content beyond it is truncated with a marker showing how to continue. 0 or omitted returns everything"`
+	StartIndex *int    `json:"start_index,omitempty" jsonschema:"Character offset to start from, for chunked reads of long pages"`
+	Query      *string `json:"query,omitempty" jsonschema:"Optional case-insensitive text to search for in the page; returns matching lines with context instead of the full content"`
+	Context    *int    `json:"context,omitempty" jsonschema:"Lines of context around each query match, default 2, maximum 10"`
+	MaxMatches *int    `json:"max_matches,omitempty" jsonschema:"Maximum query matches to return, default 20, maximum 100"`
 }
 
 type readPDFArgs struct {
@@ -121,10 +126,20 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        toolWebRead,
-		Description: "Fetch a URL and return its content as Markdown. GitHub repo / issue / pull-request URLs and Reddit comment threads are pulled from their JSON APIs; everything else is fetched as HTML and converted.",
+		Description: "Fetch a URL and return its content as Markdown. GitHub repo / issue / pull-request URLs and Reddit comment threads are pulled from their JSON APIs; everything else is fetched as HTML and converted. Use max_length/start_index for chunked reads of long pages, or query to grep within the page.",
 		Annotations: readOnlyOpenWorld(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args webReadArgs) (*mcp.CallToolResult, any, error) {
-		content, err := reader.Read(ctx, args.URL)
+		var query string
+		if args.Query != nil {
+			query = *args.Query
+		}
+		content, err := reader.ReadWithOptions(ctx, args.URL, reader.ReadOptions{
+			MaxLength:    intOrDefault(args.MaxLength, 0),
+			StartIndex:   intOrDefault(args.StartIndex, 0),
+			Query:        query,
+			ContextLines: intOrDefault(args.Context, 0),
+			MaxMatches:   intOrDefault(args.MaxMatches, 0),
+		})
 		if err != nil {
 			return nil, nil, err
 		}
