@@ -109,6 +109,9 @@ func validateURL(urlStr string) (*url.URL, error) {
 	if !slices.Contains(supportedSchemes, parsedURL.Scheme) {
 		return nil, fmt.Errorf("unsupported URL scheme: %s (only http and https are supported)", parsedURL.Scheme)
 	}
+	if err := checkDomainPolicy(parsedURL); err != nil {
+		return nil, err
+	}
 	return parsedURL, nil
 }
 
