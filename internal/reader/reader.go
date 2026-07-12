@@ -23,6 +23,7 @@ import (
 	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/base"
 	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/commonmark"
 	"github.com/PuerkitoBio/goquery"
+	readability "github.com/go-shiori/go-readability"
 	"github.com/ledongthuc/pdf"
 )
 
@@ -221,7 +222,19 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 		return string(body), nil
 	}
 
-	doc, err := goquery.NewDocumentFromReader(limitedBody(resp.Body))
+	body, err := io.ReadAll(limitedBody(resp.Body))
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// Prefer the readability extraction: it strips navigation, footers, and
+	// other boilerplate, typically shrinking the Markdown dramatically. Pages
+	// it cannot confidently extract fall back to full-page conversion.
+	if markdown, ok := readableMarkdown(body, urlStr); ok {
+		return markdown, nil
+	}
+
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to parse HTML: %w", err)
 	}
@@ -234,6 +247,45 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 		return "", fmt.Errorf("failed to serialize HTML: %w", err)
 	}
 
+	markdown, err := convertHTMLToMarkdown(html)
+	if err != nil {
+		return "", err
+	}
+
+	return cleanMarkdown(markdown), nil
+}
+
+// minReadableTextLength is the smallest extracted-article text size that we
+// trust; anything shorter suggests readability picked a fragment of the page
+// (or the page is tiny), so we fall back to full-page conversion.
+const minReadableTextLength = 500
+
+// readableMarkdown attempts a boilerplate-stripping readability extraction of
+// the page and converts the resulting article HTML to Markdown. It reports
+// false whenever extraction looks unreliable so the caller can fall back.
+func readableMarkdown(body []byte, urlStr string) (string, bool) {
+	pageURL, err := url.Parse(urlStr)
+	if err != nil {
+		return "", false
+	}
+	article, err := readability.FromReader(bytes.NewReader(body), pageURL)
+	if err != nil || strings.TrimSpace(article.Content) == "" {
+		return "", false
+	}
+	if len(strings.TrimSpace(article.TextContent)) < minReadableTextLength {
+		return "", false
+	}
+	markdown, err := convertHTMLToMarkdown(article.Content)
+	if err != nil {
+		return "", false
+	}
+	if article.Title != "" {
+		markdown = "# " + article.Title + "\n\n" + markdown
+	}
+	return cleanMarkdown(markdown), true
+}
+
+func convertHTMLToMarkdown(html string) (string, error) {
 	conv := converter.NewConverter(
 		converter.WithPlugins(
 			base.NewBasePlugin(),
@@ -244,8 +296,7 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 	if err != nil {
 		return "", fmt.Errorf("failed to convert to Markdown: %w", err)
 	}
-
-	return cleanMarkdown(markdown), nil
+	return markdown, nil
 }
 
 func isPDFResponse(contentType, urlStr string) bool {
