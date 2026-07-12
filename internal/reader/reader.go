@@ -238,9 +238,9 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 
 	// cache stores the rendered content along with the response validators so
 	// the next stale hit can revalidate with a conditional GET.
-	cache := func(content string) (string, error) {
+	cache := func(content string) string {
 		webPageCache.store(urlStr, content, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"))
-		return content, nil
+		return content
 	}
 
 	contentType := resp.Header.Get("Content-Type")
@@ -253,7 +253,7 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 		if err != nil {
 			return "", err
 		}
-		return cache(text)
+		return cache(text), nil
 	}
 	if !strings.Contains(contentType, "text/html") && !strings.Contains(contentType, "application/xhtml") {
 		body, err := io.ReadAll(limitedBody(resp.Body))
@@ -264,12 +264,12 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 			return "", fmt.Errorf("refusing to return binary response (%s)", contentType)
 		}
 		if markdown, ok := renderFeed(contentType, body); ok {
-			return cache(markdown)
+			return cache(markdown), nil
 		}
 		if pretty, ok := prettyJSON(contentType, body); ok {
-			return cache(pretty)
+			return cache(pretty), nil
 		}
-		return cache(string(body))
+		return cache(string(body)), nil
 	}
 
 	body, err := io.ReadAll(limitedBody(resp.Body))
@@ -281,7 +281,7 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 	// other boilerplate, typically shrinking the Markdown dramatically. Pages
 	// it cannot confidently extract fall back to full-page conversion.
 	if markdown, ok := readableMarkdown(body, urlStr); ok {
-		return cache(markdown)
+		return cache(markdown), nil
 	}
 
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
@@ -302,7 +302,7 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 		return "", err
 	}
 
-	return cache(cleanMarkdown(markdown))
+	return cache(cleanMarkdown(markdown)), nil
 }
 
 // minReadableTextLength is the smallest extracted-article text size that we
