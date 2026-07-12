@@ -28,7 +28,7 @@ func NewSearXNGChecked(baseURL string) (*SearXNG, error) {
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil, fmt.Errorf("invalid searxng url %q", baseURL)
 	}
-	return &SearXNG{baseURL: baseURL, client: newHTTPClient(defaultHTTPTimeout)}, nil
+	return &SearXNG{baseURL: baseURL, client: newHTTPClient()}, nil
 }
 
 func (s *SearXNG) Name() string {

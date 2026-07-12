@@ -28,7 +28,7 @@ func NewMojeek(endpoint ...string) *Mojeek {
 	if len(endpoint) > 0 && endpoint[0] != "" {
 		target = endpoint[0]
 	}
-	return &Mojeek{endpoint: target, client: newHTTPClient(defaultHTTPTimeout)}
+	return &Mojeek{endpoint: target, client: newHTTPClient()}
 }
 
 func (m *Mojeek) Name() string {

@@ -29,7 +29,7 @@ func NewDuckDuckGo(endpoint ...string) *DuckDuckGo {
 	if len(endpoint) > 0 && endpoint[0] != "" {
 		target = endpoint[0]
 	}
-	return &DuckDuckGo{endpoint: target, client: newHTTPClient(defaultHTTPTimeout)}
+	return &DuckDuckGo{endpoint: target, client: newHTTPClient()}
 }
 
 func (d *DuckDuckGo) Name() string {

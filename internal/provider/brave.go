@@ -36,7 +36,7 @@ func NewBrave(apiKey string, endpoint ...string) *Brave {
 	b := &Brave{
 		apiKey:   apiKey,
 		endpoint: target,
-		client:   newHTTPClient(defaultHTTPTimeout),
+		client:   newHTTPClient(),
 	}
 	if strings.TrimSpace(apiKey) == "" {
 		b.keyErr = fmt.Errorf("brave api key is required")

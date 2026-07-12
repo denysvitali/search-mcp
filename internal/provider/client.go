@@ -23,13 +23,10 @@ func limitedBody(r io.Reader) io.Reader {
 	return io.LimitReader(r, maxResponseBodyBytes)
 }
 
-// newHTTPClient builds an *http.Client shared per provider instance. A timeout
-// of <= 0 falls back to defaultHTTPTimeout.
-func newHTTPClient(timeout time.Duration) *http.Client {
-	if timeout <= 0 {
-		timeout = defaultHTTPTimeout
-	}
-	return &http.Client{Timeout: timeout}
+// newHTTPClient builds the *http.Client shared per provider instance, with
+// defaultHTTPTimeout applied.
+func newHTTPClient() *http.Client {
+	return &http.Client{Timeout: defaultHTTPTimeout}
 }
 
 // applyExtraHeaders sets any caller-supplied request.ExtraHeaders on the
