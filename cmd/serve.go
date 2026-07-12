@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/denysvitali/search-mcp/internal/observability"
@@ -19,6 +20,8 @@ import (
 const (
 	// toolSearch is the MCP tool name for web search.
 	toolSearch = "search"
+	// toolSearchBatch is the MCP tool name for parallel multi-query search.
+	toolSearchBatch = "search_batch"
 	// toolWebRead is the MCP tool name for fetching a URL as Markdown.
 	toolWebRead = "web_read"
 	// toolReadPDF is the MCP tool name for targeted PDF extraction.
@@ -42,6 +45,64 @@ type searchArgs struct {
 	Language   string `json:"language,omitempty" jsonschema:"Provider language code"`
 	SafeSearch string `json:"safe_search,omitempty" jsonschema:"Provider safe search mode"`
 	Freshness  string `json:"freshness,omitempty" jsonschema:"Provider freshness filter"`
+}
+
+// batchSearchArgs is the typed input for the search_batch tool.
+type batchSearchArgs struct {
+	Queries    []string `json:"queries" jsonschema:"Search queries to run in parallel, maximum 10"`
+	Provider   string   `json:"provider,omitempty" jsonschema:"Provider name: duckduckgo, mojeek, brave, searxng, or all"`
+	Count      *int     `json:"count,omitempty" jsonschema:"Maximum number of results per query"`
+	Country    string   `json:"country,omitempty" jsonschema:"Provider country code"`
+	Language   string   `json:"language,omitempty" jsonschema:"Provider language code"`
+	SafeSearch string   `json:"safe_search,omitempty" jsonschema:"Provider safe search mode"`
+	Freshness  string   `json:"freshness,omitempty" jsonschema:"Provider freshness filter"`
+}
+
+// batchSearchResult groups the per-query responses; failed queries land in
+// Errors keyed by query instead of failing the whole batch.
+type batchSearchResult struct {
+	Responses []searchdomain.Response `json:"responses"`
+	Errors    map[string]string       `json:"errors,omitempty"`
+}
+
+// maxBatchQueries caps how many queries one search_batch call may fan out.
+const maxBatchQueries = 10
+
+// runBatchSearch executes every query concurrently through the service; the
+// per-provider rate limiters still pace the actual provider calls.
+func runBatchSearch(ctx context.Context, service *searchdomain.Service, queries []string, base searchdomain.Request) batchSearchResult {
+	type outcome struct {
+		query string
+		resp  searchdomain.Response
+		err   error
+	}
+	outcomes := make([]outcome, len(queries))
+
+	var wg sync.WaitGroup
+	for i, query := range queries {
+		wg.Add(1)
+		go func(i int, query string) {
+			defer wg.Done()
+			req := base
+			req.Query = query
+			resp, err := service.Search(ctx, req)
+			outcomes[i] = outcome{query: query, resp: resp, err: err}
+		}(i, query)
+	}
+	wg.Wait()
+
+	result := batchSearchResult{}
+	for _, o := range outcomes {
+		if o.err != nil {
+			if result.Errors == nil {
+				result.Errors = make(map[string]string)
+			}
+			result.Errors[o.query] = o.err.Error()
+			continue
+		}
+		result.Responses = append(result.Responses, o.resp)
+	}
+	return result
 }
 
 type webReadArgs struct {
@@ -123,6 +184,36 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 			return nil, searchdomain.Response{}, err
 		}
 		return textResult(string(data)), resp, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        toolSearchBatch,
+		Description: "Run several web searches in parallel and return grouped results. Ideal for research fan-out; failed queries are reported per query without failing the batch.",
+		Annotations: readOnlyOpenWorld(),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args batchSearchArgs) (*mcp.CallToolResult, batchSearchResult, error) {
+		if len(args.Queries) == 0 {
+			return nil, batchSearchResult{}, fmt.Errorf("queries must not be empty")
+		}
+		if len(args.Queries) > maxBatchQueries {
+			return nil, batchSearchResult{}, fmt.Errorf("at most %d queries per batch, got %d", maxBatchQueries, len(args.Queries))
+		}
+		count, err := clampCount(intOrDefault(args.Count, viper.GetInt("count")))
+		if err != nil {
+			return nil, batchSearchResult{}, err
+		}
+		result := runBatchSearch(ctx, service, args.Queries, searchdomain.Request{
+			Provider:   valueOrDefault(args.Provider, viper.GetString("provider")),
+			Count:      count,
+			Country:    valueOrDefault(args.Country, viper.GetString("country")),
+			Language:   valueOrDefault(args.Language, viper.GetString("language")),
+			SafeSearch: valueOrDefault(args.SafeSearch, viper.GetString("safe_search")),
+			Freshness:  valueOrDefault(args.Freshness, viper.GetString("freshness")),
+		})
+		data, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return nil, batchSearchResult{}, err
+		}
+		return textResult(string(data)), result, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
