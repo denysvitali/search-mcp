@@ -16,7 +16,9 @@ type resilienceMetrics struct {
 	once sync.Once
 	// cacheEvents counts result-cache lookups, labelled by provider and
 	// event=hit|miss.
-	cacheEvents metric.Int64Counter
+	cacheEvents   metric.Int64Counter
+	cacheHitRatio metric.Float64ObservableGauge
+	cacheStats    sync.Map
 	// breakerTransitions counts circuit-breaker state changes, labelled by
 	// provider and the target state.
 	breakerTransitions metric.Int64Counter
@@ -26,6 +28,11 @@ type resilienceMetrics struct {
 	states       sync.Map
 }
 
+type cacheStats struct {
+	mu           sync.Mutex
+	hits, misses int64
+}
+
 var metrics resilienceMetrics
 
 func (m *resilienceMetrics) init() {
@@ -33,6 +40,24 @@ func (m *resilienceMetrics) init() {
 		meter := otel.Meter("search-mcp/resilience")
 		if counter, err := meter.Int64Counter("search_cache_events_total"); err == nil {
 			m.cacheEvents = counter
+		}
+		if gauge, err := meter.Float64ObservableGauge("search_cache_hit_ratio"); err == nil {
+			m.cacheHitRatio = gauge
+			_, _ = meter.RegisterCallback(func(_ context.Context, observer metric.Observer) error {
+				m.cacheStats.Range(func(provider, value any) bool {
+					stats := value.(*cacheStats)
+					stats.mu.Lock()
+					total := stats.hits + stats.misses
+					ratio := 0.0
+					if total > 0 {
+						ratio = float64(stats.hits) / float64(total)
+					}
+					stats.mu.Unlock()
+					observer.ObserveFloat64(gauge, ratio, metric.WithAttributes(attribute.String("search.provider", provider.(string))))
+					return true
+				})
+				return nil
+			}, gauge)
 		}
 		if counter, err := meter.Int64Counter("search_breaker_transitions_total"); err == nil {
 			m.breakerTransitions = counter
@@ -55,6 +80,15 @@ func (m *resilienceMetrics) init() {
 // recordCacheEvent counts a cache hit or miss for a provider.
 func recordCacheEvent(ctx context.Context, provider, event string) {
 	metrics.init()
+	value, _ := metrics.cacheStats.LoadOrStore(provider, &cacheStats{})
+	stats := value.(*cacheStats)
+	stats.mu.Lock()
+	if event == "hit" {
+		stats.hits++
+	} else {
+		stats.misses++
+	}
+	stats.mu.Unlock()
 	if metrics.cacheEvents == nil {
 		return
 	}

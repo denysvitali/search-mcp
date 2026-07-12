@@ -49,6 +49,12 @@ func init() {
 	rootCmd.PersistentFlags().String("provider", "", "search provider")
 	rootCmd.PersistentFlags().String("brave-api-key", "", "Brave Search API key")
 	rootCmd.PersistentFlags().String("brave-endpoint", "", "Brave Search API endpoint")
+	rootCmd.PersistentFlags().String("kagi-api-key", "", "Kagi Search API key")
+	rootCmd.PersistentFlags().String("kagi-endpoint", "", "Kagi Search API endpoint")
+	rootCmd.PersistentFlags().String("exa-api-key", "", "Exa Search API key")
+	rootCmd.PersistentFlags().String("exa-endpoint", "", "Exa Search API endpoint")
+	rootCmd.PersistentFlags().String("tavily-api-key", "", "Tavily Search API key")
+	rootCmd.PersistentFlags().String("tavily-endpoint", "", "Tavily Search API endpoint")
 	rootCmd.PersistentFlags().String("duckduckgo-endpoint", "", "DuckDuckGo HTML search endpoint")
 	rootCmd.PersistentFlags().String("mojeek-endpoint", "", "Mojeek search HTML endpoint")
 	rootCmd.PersistentFlags().String("searxng-url", "", "SearXNG instance URL (enables the searxng provider)")
@@ -73,6 +79,12 @@ func init() {
 	_ = viper.BindPFlag("provider", rootCmd.PersistentFlags().Lookup("provider"))
 	_ = viper.BindPFlag("brave_api_key", rootCmd.PersistentFlags().Lookup("brave-api-key"))
 	_ = viper.BindPFlag("brave_endpoint", rootCmd.PersistentFlags().Lookup("brave-endpoint"))
+	_ = viper.BindPFlag("kagi_api_key", rootCmd.PersistentFlags().Lookup("kagi-api-key"))
+	_ = viper.BindPFlag("kagi_endpoint", rootCmd.PersistentFlags().Lookup("kagi-endpoint"))
+	_ = viper.BindPFlag("exa_api_key", rootCmd.PersistentFlags().Lookup("exa-api-key"))
+	_ = viper.BindPFlag("exa_endpoint", rootCmd.PersistentFlags().Lookup("exa-endpoint"))
+	_ = viper.BindPFlag("tavily_api_key", rootCmd.PersistentFlags().Lookup("tavily-api-key"))
+	_ = viper.BindPFlag("tavily_endpoint", rootCmd.PersistentFlags().Lookup("tavily-endpoint"))
 	_ = viper.BindPFlag("duckduckgo_endpoint", rootCmd.PersistentFlags().Lookup("duckduckgo-endpoint"))
 	_ = viper.BindPFlag("mojeek_endpoint", rootCmd.PersistentFlags().Lookup("mojeek-endpoint"))
 	_ = viper.BindPFlag("searxng_url", rootCmd.PersistentFlags().Lookup("searxng-url"))
@@ -170,6 +182,23 @@ func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
 			return nil, fmt.Errorf("searxng provider: %w", err)
 		}
 		providers = append(providers, resilience.Wrap(searxng, resilienceCfg))
+	}
+	for _, configured := range []struct {
+		key, endpoint, name string
+		new                 func(string, ...string) (search.Provider, error)
+	}{
+		{viper.GetString("kagi_api_key"), viper.GetString("kagi_endpoint"), "kagi", func(k string, e ...string) (search.Provider, error) { return provider.NewKagiChecked(k, e...) }},
+		{viper.GetString("exa_api_key"), viper.GetString("exa_endpoint"), "exa", func(k string, e ...string) (search.Provider, error) { return provider.NewExaChecked(k, e...) }},
+		{viper.GetString("tavily_api_key"), viper.GetString("tavily_endpoint"), "tavily", func(k string, e ...string) (search.Provider, error) { return provider.NewTavilyChecked(k, e...) }},
+	} {
+		if configured.key == "" {
+			continue
+		}
+		p, err := configured.new(configured.key, configured.endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("%s provider: %w", configured.name, err)
+		}
+		providers = append(providers, resilience.Wrap(p, resilienceCfg))
 	}
 	return search.NewService(providers, viper.GetFloat64("rate_rps"), viper.GetInt("rate_burst"), logger)
 }

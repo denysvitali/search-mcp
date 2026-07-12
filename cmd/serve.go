@@ -45,7 +45,7 @@ const (
 // input schema from it and validates arguments before the handler runs.
 type searchArgs struct {
 	Query      string `json:"query" jsonschema:"Search query"`
-	Provider   string `json:"provider,omitempty" jsonschema:"Provider name: duckduckgo, mojeek, brave, searxng, or all to fan out to every provider and merge rankings"`
+	Provider   string `json:"provider,omitempty" jsonschema:"Provider name: duckduckgo, mojeek, brave, searxng, kagi, exa, tavily, or all to fan out to every provider and merge rankings"`
 	Count      *int   `json:"count,omitempty" jsonschema:"Maximum number of results"`
 	Country    string `json:"country,omitempty" jsonschema:"Provider country code"`
 	Language   string `json:"language,omitempty" jsonschema:"Provider language code"`
@@ -56,7 +56,7 @@ type searchArgs struct {
 // batchSearchArgs is the typed input for the search_batch tool.
 type batchSearchArgs struct {
 	Queries    []string `json:"queries" jsonschema:"Search queries to run in parallel, maximum 10"`
-	Provider   string   `json:"provider,omitempty" jsonschema:"Provider name: duckduckgo, mojeek, brave, searxng, or all"`
+	Provider   string   `json:"provider,omitempty" jsonschema:"Provider name: duckduckgo, mojeek, brave, searxng, kagi, exa, tavily, or all"`
 	Count      *int     `json:"count,omitempty" jsonschema:"Maximum number of results per query"`
 	Country    string   `json:"country,omitempty" jsonschema:"Provider country code"`
 	Language   string   `json:"language,omitempty" jsonschema:"Provider language code"`
@@ -154,6 +154,16 @@ type webReadArgs struct {
 	Context    *int    `json:"context,omitempty" jsonschema:"Lines of context around each query match, default 2, maximum 10"`
 	MaxMatches *int    `json:"max_matches,omitempty" jsonschema:"Maximum query matches to return, default 20, maximum 100"`
 	Links      *bool   `json:"links,omitempty" jsonschema:"When true, return the page's links (anchor text plus absolute URL) instead of its content"`
+}
+
+// webReadResult is returned as structured content alongside the Markdown text.
+type webReadResult struct {
+	Content string `json:"content"`
+}
+
+// readPDFResult is returned as structured content alongside the Markdown text.
+type readPDFResult struct {
+	Content string `json:"content"`
 }
 
 type readPDFArgs struct {
@@ -261,13 +271,13 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 		Name:        toolWebRead,
 		Description: "Fetch a URL and return its content as Markdown. GitHub repo / issue / pull-request URLs and Reddit comment threads are pulled from their JSON APIs; everything else is fetched as HTML and converted. Use max_length/start_index for chunked reads of long pages, or query to grep within the page.",
 		Annotations: readOnlyOpenWorld(),
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args webReadArgs) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args webReadArgs) (*mcp.CallToolResult, webReadResult, error) {
 		if args.Links != nil && *args.Links {
 			content, err := reader.ExtractLinks(ctx, args.URL)
 			if err != nil {
-				return nil, nil, err
+				return nil, webReadResult{}, err
 			}
-			return textResult(content), nil, nil
+			return textResult(content), webReadResult{Content: content}, nil
 		}
 		var query string
 		if args.Query != nil {
@@ -281,9 +291,9 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 			MaxMatches:   intOrDefault(args.MaxMatches, 0),
 		})
 		if err != nil {
-			return nil, nil, err
+			return nil, webReadResult{}, err
 		}
-		return textResult(content), nil, nil
+		return textResult(content), webReadResult{Content: content}, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -303,20 +313,20 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 		Name:        toolReadPDF,
 		Description: "Read selected pages or search a PDF and return page-numbered text. Use pages for 1-based ranges such as 1-3,17, or query to find matching text. With neither, returns the PDF's metadata, page count, and outline so you can target pages. Results never include PDF bytes.",
 		Annotations: readOnlyOpenWorld(),
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args readPDFArgs) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args readPDFArgs) (*mcp.CallToolResult, readPDFResult, error) {
 		contextLines, err := clampPDFNumber(intOrDefault(args.Context, 2), maxPDFContextLines, "context")
 		if err != nil {
-			return nil, nil, err
+			return nil, readPDFResult{}, err
 		}
 		maxResults, err := clampPDFNumber(intOrDefault(args.MaxResults, 20), maxPDFResults, "max_results")
 		if err != nil {
-			return nil, nil, err
+			return nil, readPDFResult{}, err
 		}
 		content, err := reader.ReadPDF(ctx, args.URL, args.Pages, args.Query, contextLines, maxResults)
 		if err != nil {
-			return nil, nil, err
+			return nil, readPDFResult{}, err
 		}
-		return textResult(content), nil, nil
+		return textResult(content), readPDFResult{Content: content}, nil
 	})
 
 	return s
