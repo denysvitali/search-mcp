@@ -44,7 +44,7 @@ Each provider is wrapped with resilience decorators: transient failures (HTTP 42
 The MCP server exposes three tools:
 
 - `search` — run a query through one of the providers above (with automatic fallback).
-- `web_read` — fetch a URL and return Markdown. Several hosts are pulled through their native APIs and rendered as structured Markdown: GitHub repos / issues / pull-requests, Reddit comment threads, Hacker News items, Stack Overflow questions, and arXiv abstracts. Everything else is fetched as HTML and converted via `html-to-markdown`.
+- `web_read` — fetch a URL and return Markdown. Several hosts are pulled through their native APIs and rendered as structured Markdown: GitHub repos / issues / pull-requests, Reddit comment threads, Hacker News items, Stack Overflow questions, arXiv abstracts, and YouTube videos with public transcripts. Everything else is fetched as HTML and converted via `html-to-markdown`.
 - `read_pdf` — fetch a PDF and return selected page ranges or case-insensitive search matches with page numbers and optional line context. It never returns PDF bytes.
 
 Set `--otel --otel-exporter otlp` to export traces and metrics through the OpenTelemetry OTLP HTTP exporters. Standard OTEL environment variables such as `OTEL_EXPORTER_OTLP_ENDPOINT` are honored by the exporter packages.

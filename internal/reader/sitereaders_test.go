@@ -39,11 +39,70 @@ func TestSiteReaderPredicates(t *testing.T) {
 		{"https://gitlab.com/group/proj", isGitLabIssuableURL, false},
 		{"https://pkg.go.dev/golang.org/x/time/rate", isPkgGoDevURL, true},
 		{"https://pkg.go.dev/", isPkgGoDevURL, false},
+		{"https://www.youtube.com/watch?v=abc123", isYouTubeVideoURL, true},
+		{"https://youtu.be/abc123", isYouTubeVideoURL, true},
+		{"https://www.youtube.com/shorts/abc123", isYouTubeVideoURL, true},
+		{"https://www.youtube.com/channel/example", isYouTubeVideoURL, false},
 	}
 	for _, tc := range cases {
 		if got := tc.pred(mustParse(t, tc.url)); got != tc.want {
 			t.Errorf("predicate(%s) = %v, want %v", tc.url, got, tc.want)
 		}
+	}
+}
+
+func TestFetchYouTubeTranscript(t *testing.T) {
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/watch":
+			if got := r.URL.Query().Get("v"); got != "abc123" {
+				t.Errorf("video ID = %q", got)
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<script>var ytInitialPlayerResponse = {"videoDetails":{"title":"Go talk","author":"Gopher","lengthSeconds":"125"},"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[{"baseUrl":"` + serverURL + `/api/timedtext?lang=en","languageCode":"en","name":{"simpleText":"English"}}]}}};</script>`))
+		case "/api/timedtext":
+			if got := r.URL.Query().Get("fmt"); got != "json3" {
+				t.Errorf("format = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"events":[{"tStartMs":0,"segs":[{"utf8":"Hello world"}]},{"tStartMs":65000,"segs":[{"utf8":"Second line"}]}]}`))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	serverURL = server.URL
+	youTubeWatchBaseURL = server.URL + "/watch"
+	t.Cleanup(func() { youTubeWatchBaseURL = "https://www.youtube.com/watch" })
+
+	got, err := Read(context.Background(), "https://youtu.be/abc123")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	for _, want := range []string{"# Go talk", "Gopher", "02:05", "## Transcript (English)", "[00:00] Hello world", "[01:05] Second line"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestFetchYouTubeWithoutCaptions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<script>ytInitialPlayerResponse = {"videoDetails":{"title":"Silent video"}};</script>`))
+	}))
+	defer server.Close()
+	youTubeWatchBaseURL = server.URL + "/watch"
+	t.Cleanup(func() { youTubeWatchBaseURL = "https://www.youtube.com/watch" })
+
+	got, err := Read(context.Background(), "https://www.youtube.com/watch?v=abc123")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !strings.Contains(got, "No public transcript") {
+		t.Errorf("missing no-transcript message:\n%s", got)
 	}
 }
 

@@ -89,6 +89,9 @@ func Read(ctx context.Context, urlStr string) (string, error) {
 	if isPkgGoDevURL(parsedURL) {
 		return fetchPkgGoDevContentAsMarkdown(ctx, client, parsedURL)
 	}
+	if isYouTubeVideoURL(parsedURL) {
+		return fetchYouTubeContentAsMarkdown(ctx, client, parsedURL)
+	}
 	if isHackerNewsItemURL(parsedURL) {
 		return fetchHackerNewsContentAsMarkdown(ctx, client, parsedURL)
 	}
