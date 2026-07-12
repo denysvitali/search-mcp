@@ -71,8 +71,23 @@ func Read(ctx context.Context, urlStr string) (string, error) {
 	if isGitHubIssueOrPRURL(parsedURL) {
 		return fetchGitHubContentAsMarkdown(ctx, client, parsedURL)
 	}
+	if isGitHubBlobURL(parsedURL) {
+		return fetchGitHubFileAsMarkdown(ctx, client, parsedURL)
+	}
 	if isGitHubRepoURL(parsedURL) {
 		return fetchGitHubRepoAsMarkdown(ctx, client, parsedURL)
+	}
+	if isWikipediaArticleURL(parsedURL) {
+		return fetchWikipediaContentAsMarkdown(ctx, client, parsedURL)
+	}
+	if isLobstersStoryURL(parsedURL) {
+		return fetchLobstersContentAsMarkdown(ctx, client, parsedURL)
+	}
+	if isGitLabIssuableURL(parsedURL) {
+		return fetchGitLabContentAsMarkdown(ctx, client, parsedURL)
+	}
+	if isPkgGoDevURL(parsedURL) {
+		return fetchPkgGoDevContentAsMarkdown(ctx, client, parsedURL)
 	}
 	if isHackerNewsItemURL(parsedURL) {
 		return fetchHackerNewsContentAsMarkdown(ctx, client, parsedURL)
