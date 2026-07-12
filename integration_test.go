@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -81,7 +80,7 @@ func TestIntegrationMCPWebSearchTool(t *testing.T) {
 		t.Fatalf("search returned error: %#v", result.Content)
 	}
 
-	text := toolText(t, result)
+	text := toolStructured(t, result)
 	var resp searchResponse
 	if err := json.Unmarshal([]byte(text), &resp); err != nil {
 		t.Fatalf("decode tool result: %v\n%s", err, text)
@@ -150,7 +149,7 @@ func TestIntegrationMCPHTTPTransport(t *testing.T) {
 	}
 
 	var resp searchResponse
-	if err := json.Unmarshal([]byte(toolText(t, result)), &resp); err != nil {
+	if err := json.Unmarshal([]byte(toolStructured(t, result)), &resp); err != nil {
 		t.Fatalf("decode tool result: %v", err)
 	}
 	assertSearchResponse(t, resp)
@@ -231,19 +230,14 @@ func assertSearchResponse(t *testing.T, resp searchResponse) {
 	}
 }
 
-func toolText(t *testing.T, result *mcp.CallToolResult) string {
+func toolStructured(t *testing.T, result *mcp.CallToolResult) string {
 	t.Helper()
-
-	var b strings.Builder
-	for _, content := range result.Content {
-		text, ok := content.(*mcp.TextContent)
-		if !ok {
-			continue
-		}
-		b.WriteString(text.Text)
+	if len(result.Content) != 0 {
+		t.Fatalf("structured tool result unexpectedly has text content: %#v", result.Content)
 	}
-	if b.Len() == 0 {
-		t.Fatalf("tool result had no text content: %#v", result.Content)
+	data, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal structured content: %v", err)
 	}
-	return b.String()
+	return string(data)
 }

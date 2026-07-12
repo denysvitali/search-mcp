@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -202,8 +201,11 @@ func readOnlyOpenWorld() *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}
 }
 
-func textResult(text string) *mcp.CallToolResult {
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
+// structuredResult suppresses the SDK's compatibility JSON text block. The
+// typed tool output is returned only through structuredContent, avoiding a
+// second copy of large search and reader payloads.
+func structuredResult() *mcp.CallToolResult {
+	return &mcp.CallToolResult{Content: []mcp.Content{}}
 }
 
 func newMCPServer(service *searchdomain.Service) *mcp.Server {
@@ -230,11 +232,7 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 		if err != nil {
 			return nil, searchdomain.Response{}, err
 		}
-		data, err := json.MarshalIndent(resp, "", "  ")
-		if err != nil {
-			return nil, searchdomain.Response{}, err
-		}
-		return textResult(string(data)), resp, nil
+		return structuredResult(), resp, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -260,11 +258,7 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 			SafeSearch: valueOrDefault(args.SafeSearch, viper.GetString("safe_search")),
 			Freshness:  valueOrDefault(args.Freshness, viper.GetString("freshness")),
 		})
-		data, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return nil, batchSearchResult{}, err
-		}
-		return textResult(string(data)), result, nil
+		return structuredResult(), result, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -277,7 +271,7 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 			if err != nil {
 				return nil, webReadResult{}, err
 			}
-			return textResult(content), webReadResult{Content: content}, nil
+			return structuredResult(), webReadResult{Content: content}, nil
 		}
 		var query string
 		if args.Query != nil {
@@ -293,7 +287,7 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 		if err != nil {
 			return nil, webReadResult{}, err
 		}
-		return textResult(content), webReadResult{Content: content}, nil
+		return structuredResult(), webReadResult{Content: content}, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -302,11 +296,7 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, providerStatusResult, error) {
 		result := collectProviderStatus(service)
-		data, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return nil, providerStatusResult{}, err
-		}
-		return textResult(string(data)), result, nil
+		return structuredResult(), result, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -326,7 +316,7 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 		if err != nil {
 			return nil, readPDFResult{}, err
 		}
-		return textResult(content), readPDFResult{Content: content}, nil
+		return structuredResult(), readPDFResult{Content: content}, nil
 	})
 
 	return s
