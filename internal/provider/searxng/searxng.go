@@ -1,4 +1,4 @@
-package provider
+package searxng
 
 import (
 	"context"
@@ -8,8 +8,16 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/denysvitali/search-mcp/internal/provider"
+	"github.com/denysvitali/search-mcp/internal/provider/common"
 	"github.com/denysvitali/search-mcp/internal/search"
 )
+
+func init() {
+	provider.Register("searxng", func(_, endpoint string) (search.Provider, error) {
+		return NewSearXNGChecked(endpoint)
+	})
+}
 
 // SearXNG queries a self-hosted SearXNG instance's JSON API. The instance URL
 // is mandatory: there is no default public endpoint.
@@ -17,6 +25,8 @@ type SearXNG struct {
 	baseURL string
 	client  *http.Client
 }
+
+var _ provider.Provider = (*SearXNG)(nil)
 
 // NewSearXNGChecked constructs a SearXNG provider, validating the instance URL.
 func NewSearXNGChecked(baseURL string) (*SearXNG, error) {
@@ -28,7 +38,7 @@ func NewSearXNGChecked(baseURL string) (*SearXNG, error) {
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil, fmt.Errorf("invalid searxng url %q", baseURL)
 	}
-	return &SearXNG{baseURL: baseURL, client: newHTTPClient()}, nil
+	return &SearXNG{baseURL: baseURL, client: common.NewHTTPClient()}, nil
 }
 
 func (s *SearXNG) Name() string {
@@ -75,7 +85,7 @@ func (s *SearXNG) Search(ctx context.Context, req search.Request) (search.Respon
 		return search.Response{}, err
 	}
 	httpReq.Header.Set("Accept", "application/json")
-	applyExtraHeaders(httpReq, req)
+	common.ApplyExtraHeaders(httpReq, req)
 
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
@@ -89,13 +99,13 @@ func (s *SearXNG) Search(ctx context.Context, req search.Request) (search.Respon
 	case resp.StatusCode == http.StatusForbidden:
 		// Instances without the json format enabled answer 403; treat it as
 		// blocked so the service can fall through to another provider.
-		return search.Response{}, fmt.Errorf("searxng returned http 403 (is format=json enabled?): %w", ErrBlocked)
+		return search.Response{}, fmt.Errorf("searxng returned http 403 (is format=json enabled?): %w", provider.ErrBlocked)
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
 		return search.Response{}, fmt.Errorf("searxng search failed: %s", resp.Status)
 	}
 
 	var payload searxngResponse
-	if err := json.NewDecoder(limitedBody(resp.Body)).Decode(&payload); err != nil {
+	if err := json.NewDecoder(common.LimitedBody(resp.Body)).Decode(&payload); err != nil {
 		return search.Response{}, err
 	}
 

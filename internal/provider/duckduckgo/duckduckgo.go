@@ -1,4 +1,4 @@
-package provider
+package duckduckgo
 
 import (
 	"bytes"
@@ -10,9 +10,17 @@ import (
 	"strings"
 
 	"github.com/denysvitali/search-mcp/internal/htmlutil"
+	"github.com/denysvitali/search-mcp/internal/provider"
+	"github.com/denysvitali/search-mcp/internal/provider/common"
 	"github.com/denysvitali/search-mcp/internal/search"
 	"golang.org/x/net/html"
 )
+
+func init() {
+	provider.Register("duckduckgo", func(_, endpoint string) (search.Provider, error) {
+		return NewDuckDuckGo(endpoint), nil
+	})
+}
 
 const (
 	duckDuckGoEndpoint  = "https://html.duckduckgo.com/html/"
@@ -24,12 +32,14 @@ type DuckDuckGo struct {
 	client   *http.Client
 }
 
+var _ provider.Provider = (*DuckDuckGo)(nil)
+
 func NewDuckDuckGo(endpoint ...string) *DuckDuckGo {
 	target := duckDuckGoEndpoint
 	if len(endpoint) > 0 && endpoint[0] != "" {
 		target = endpoint[0]
 	}
-	return &DuckDuckGo{endpoint: target, client: newHTTPClient()}
+	return &DuckDuckGo{endpoint: target, client: common.NewHTTPClient()}
 }
 
 func (d *DuckDuckGo) Name() string {
@@ -54,7 +64,7 @@ func (d *DuckDuckGo) Search(ctx context.Context, req search.Request) (search.Res
 	for k, v := range duckDuckGoHeaders() {
 		httpReq.Header.Set(k, v)
 	}
-	applyExtraHeaders(httpReq, req)
+	common.ApplyExtraHeaders(httpReq, req)
 
 	resp, err := d.client.Do(httpReq)
 	if err != nil {
@@ -62,7 +72,7 @@ func (d *DuckDuckGo) Search(ctx context.Context, req search.Request) (search.Res
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(limitedBody(resp.Body))
+	body, err := io.ReadAll(common.LimitedBody(resp.Body))
 	if err != nil {
 		return search.Response{}, fmt.Errorf("read duckduckgo response: %w", err)
 	}
@@ -71,7 +81,7 @@ func (d *DuckDuckGo) Search(ctx context.Context, req search.Request) (search.Res
 	// failure mode is a 200 that still contains anomaly.js. Treat both as the
 	// same condition so callers fall back to another provider.
 	if isDuckAnomaly(body) {
-		return search.Response{}, fmt.Errorf("duckduckgo served anomaly page; source ip rate-limited or fingerprinted: %w", ErrBlocked)
+		return search.Response{}, fmt.Errorf("duckduckgo served anomaly page; source ip rate-limited or fingerprinted: %w", provider.ErrBlocked)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return search.Response{}, fmt.Errorf("duckduckgo search failed: status %d", resp.StatusCode)

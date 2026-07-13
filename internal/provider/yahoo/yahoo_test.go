@@ -1,4 +1,4 @@
-package provider
+package yahoo
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/denysvitali/search-mcp/internal/provider"
 	"github.com/denysvitali/search-mcp/internal/search"
 )
 
@@ -42,7 +43,7 @@ func TestYahooSearchClassifiesBlocking(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
 			defer server.Close()
 			_, err := NewYahoo(server.URL).Search(context.Background(), search.Request{Query: "x"})
-			if err == nil || (!errors.Is(err, ErrBlocked) && !errors.Is(err, ErrRateLimited)) {
+			if err == nil || (!errors.Is(err, provider.ErrBlocked) && !errors.Is(err, provider.ErrRateLimited)) {
 				t.Fatalf("error = %v, want blocked or rate limited", err)
 			}
 		})

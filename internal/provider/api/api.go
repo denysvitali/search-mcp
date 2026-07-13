@@ -1,4 +1,4 @@
-package provider
+package api
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/denysvitali/search-mcp/internal/provider/common"
 	"github.com/denysvitali/search-mcp/internal/search"
 )
 
@@ -24,6 +25,12 @@ type Kagi struct{ apiProvider }
 type Exa struct{ apiProvider }
 type Tavily struct{ apiProvider }
 
+var (
+	_ search.Provider = (*Kagi)(nil)
+	_ search.Provider = (*Exa)(nil)
+	_ search.Provider = (*Tavily)(nil)
+)
+
 type apiProvider struct {
 	name, apiKey, endpoint string
 	client                 *http.Client
@@ -31,7 +38,7 @@ type apiProvider struct {
 }
 
 func newAPIProvider(name, key, endpoint string) apiProvider {
-	p := apiProvider{name: name, apiKey: key, endpoint: endpoint, client: newHTTPClient()}
+	p := apiProvider{name: name, apiKey: key, endpoint: endpoint, client: common.NewHTTPClient()}
 	if strings.TrimSpace(key) == "" {
 		p.keyErr = fmt.Errorf("%s api key is required", name)
 	}
@@ -93,7 +100,7 @@ func (p *Kagi) Search(ctx context.Context, req search.Request) (search.Response,
 	}
 	h.Header.Set("Authorization", "Bot "+p.apiKey)
 	h.Header.Set("Accept", "application/json")
-	applyExtraHeaders(h, req)
+	common.ApplyExtraHeaders(h, req)
 	resp, err := p.client.Do(h)
 	if err != nil {
 		return search.Response{}, err
@@ -111,7 +118,7 @@ func (p *Kagi) Search(ctx context.Context, req search.Request) (search.Response,
 			Published  string `json:"published"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(limitedBody(resp.Body)).Decode(&payload); err != nil {
+	if err := json.NewDecoder(common.LimitedBody(resp.Body)).Decode(&payload); err != nil {
 		return search.Response{}, err
 	}
 	results := make([]search.Result, 0, len(payload.Data))
@@ -140,7 +147,7 @@ func (p *Exa) Search(ctx context.Context, req search.Request) (search.Response, 
 	h.Header.Set("x-api-key", p.apiKey)
 	h.Header.Set("Content-Type", "application/json")
 	h.Header.Set("Accept", "application/json")
-	applyExtraHeaders(h, req)
+	common.ApplyExtraHeaders(h, req)
 	resp, err := p.client.Do(h)
 	if err != nil {
 		return search.Response{}, err
@@ -158,7 +165,7 @@ func (p *Exa) Search(ctx context.Context, req search.Request) (search.Response, 
 			Published  string   `json:"publishedDate"`
 		} `json:"results"`
 	}
-	if err := json.NewDecoder(limitedBody(resp.Body)).Decode(&payload); err != nil {
+	if err := json.NewDecoder(common.LimitedBody(resp.Body)).Decode(&payload); err != nil {
 		return search.Response{}, err
 	}
 	results := make([]search.Result, 0, len(payload.Results))
@@ -191,7 +198,7 @@ func (p *Tavily) Search(ctx context.Context, req search.Request) (search.Respons
 	h.Header.Set("Authorization", "Bearer "+p.apiKey)
 	h.Header.Set("Content-Type", "application/json")
 	h.Header.Set("Accept", "application/json")
-	applyExtraHeaders(h, req)
+	common.ApplyExtraHeaders(h, req)
 	resp, err := p.client.Do(h)
 	if err != nil {
 		return search.Response{}, err
@@ -208,7 +215,7 @@ func (p *Tavily) Search(ctx context.Context, req search.Request) (search.Respons
 			Published string `json:"published_date"`
 		} `json:"results"`
 	}
-	if err := json.NewDecoder(limitedBody(resp.Body)).Decode(&out); err != nil {
+	if err := json.NewDecoder(common.LimitedBody(resp.Body)).Decode(&out); err != nil {
 		return search.Response{}, err
 	}
 	results := make([]search.Result, 0, len(out.Results))

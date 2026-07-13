@@ -1,4 +1,4 @@
-package provider
+package common
 
 import (
 	"io"
@@ -19,19 +19,19 @@ const maxResponseBodyBytes = 10 << 20 // 10 MiB
 // limitedBody wraps a response body with an io.LimitReader capped at
 // maxResponseBodyBytes so a provider cannot be forced to consume an unbounded
 // amount of memory.
-func limitedBody(r io.Reader) io.Reader {
+func LimitedBody(r io.Reader) io.Reader {
 	return io.LimitReader(r, maxResponseBodyBytes)
 }
 
 // newHTTPClient builds the *http.Client shared per provider instance, with
 // defaultHTTPTimeout applied.
-func newHTTPClient() *http.Client {
+func NewHTTPClient() *http.Client {
 	return &http.Client{Timeout: defaultHTTPTimeout}
 }
 
 // applyExtraHeaders sets any caller-supplied request.ExtraHeaders on the
 // outgoing request, overriding provider defaults of the same name.
-func applyExtraHeaders(req *http.Request, r search.Request) {
+func ApplyExtraHeaders(req *http.Request, r search.Request) {
 	for k, v := range r.ExtraHeaders {
 		req.Header.Set(k, v)
 	}

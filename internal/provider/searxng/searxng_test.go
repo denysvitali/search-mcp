@@ -1,4 +1,4 @@
-package provider
+package searxng
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/denysvitali/search-mcp/internal/provider"
 	"github.com/denysvitali/search-mcp/internal/search"
 )
 
@@ -66,13 +67,13 @@ func TestSearXNGErrors(t *testing.T) {
 	}
 
 	_, err = p.Search(context.Background(), search.Request{Query: "x"})
-	if !errors.Is(err, ErrRateLimited) {
+	if !errors.Is(err, provider.ErrRateLimited) {
 		t.Errorf("429 err = %v, want ErrRateLimited", err)
 	}
 
 	status = http.StatusForbidden
 	_, err = p.Search(context.Background(), search.Request{Query: "x"})
-	if !errors.Is(err, ErrBlocked) {
+	if !errors.Is(err, provider.ErrBlocked) {
 		t.Errorf("403 err = %v, want ErrBlocked", err)
 	}
 }

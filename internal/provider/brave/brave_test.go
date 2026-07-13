@@ -1,4 +1,4 @@
-package provider
+package brave
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/denysvitali/search-mcp/internal/provider"
 	"github.com/denysvitali/search-mcp/internal/search"
 )
 
@@ -41,7 +42,7 @@ func TestBraveSearchSurfacesRateLimit(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !errors.Is(err, ErrRateLimited) {
+	if !errors.Is(err, provider.ErrRateLimited) {
 		t.Fatalf("error = %v, want ErrRateLimited", err)
 	}
 }

@@ -9,6 +9,14 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/denysvitali/search-mcp/internal/provider"
+	_ "github.com/denysvitali/search-mcp/internal/provider/brave"
+	_ "github.com/denysvitali/search-mcp/internal/provider/duckduckgo"
+	_ "github.com/denysvitali/search-mcp/internal/provider/exa"
+	_ "github.com/denysvitali/search-mcp/internal/provider/kagi"
+	_ "github.com/denysvitali/search-mcp/internal/provider/mojeek"
+	_ "github.com/denysvitali/search-mcp/internal/provider/searxng"
+	_ "github.com/denysvitali/search-mcp/internal/provider/tavily"
+	_ "github.com/denysvitali/search-mcp/internal/provider/yahoo"
 	"github.com/denysvitali/search-mcp/internal/reader"
 	"github.com/denysvitali/search-mcp/internal/resilience"
 	"github.com/denysvitali/search-mcp/internal/search"
@@ -167,39 +175,27 @@ func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
 		CacheTTL:         viper.GetDuration("cache_ttl"),
 	}
 
-	providers := []search.Provider{
-		resilience.Wrap(provider.NewDuckDuckGo(viper.GetString("duckduckgo_endpoint")), resilienceCfg),
-		resilience.Wrap(provider.NewMojeek(viper.GetString("mojeek_endpoint")), resilienceCfg),
-		resilience.Wrap(provider.NewYahoo(viper.GetString("yahoo_endpoint")), resilienceCfg),
-	}
-	if viper.GetString("brave_api_key") != "" {
-		brave, err := provider.NewBraveChecked(viper.GetString("brave_api_key"), viper.GetString("brave_endpoint"))
-		if err != nil {
-			return nil, fmt.Errorf("brave provider: %w", err)
-		}
-		providers = append(providers, resilience.Wrap(brave, resilienceCfg))
-	}
-	if viper.GetString("searxng_url") != "" {
-		searxng, err := provider.NewSearXNGChecked(viper.GetString("searxng_url"))
-		if err != nil {
-			return nil, fmt.Errorf("searxng provider: %w", err)
-		}
-		providers = append(providers, resilience.Wrap(searxng, resilienceCfg))
-	}
-	for _, configured := range []struct {
-		key, endpoint, name string
-		new                 func(string, ...string) (search.Provider, error)
+	configured := []struct {
+		name, key, endpoint string
+		enabled             bool
 	}{
-		{viper.GetString("kagi_api_key"), viper.GetString("kagi_endpoint"), "kagi", func(k string, e ...string) (search.Provider, error) { return provider.NewKagiChecked(k, e...) }},
-		{viper.GetString("exa_api_key"), viper.GetString("exa_endpoint"), "exa", func(k string, e ...string) (search.Provider, error) { return provider.NewExaChecked(k, e...) }},
-		{viper.GetString("tavily_api_key"), viper.GetString("tavily_endpoint"), "tavily", func(k string, e ...string) (search.Provider, error) { return provider.NewTavilyChecked(k, e...) }},
-	} {
-		if configured.key == "" {
+		{name: "duckduckgo", endpoint: viper.GetString("duckduckgo_endpoint"), enabled: true},
+		{name: "mojeek", endpoint: viper.GetString("mojeek_endpoint"), enabled: true},
+		{name: "yahoo", endpoint: viper.GetString("yahoo_endpoint"), enabled: true},
+		{name: "brave", key: viper.GetString("brave_api_key"), endpoint: viper.GetString("brave_endpoint"), enabled: viper.GetString("brave_api_key") != ""},
+		{name: "searxng", endpoint: viper.GetString("searxng_url"), enabled: viper.GetString("searxng_url") != ""},
+		{name: "kagi", key: viper.GetString("kagi_api_key"), endpoint: viper.GetString("kagi_endpoint"), enabled: viper.GetString("kagi_api_key") != ""},
+		{name: "exa", key: viper.GetString("exa_api_key"), endpoint: viper.GetString("exa_endpoint"), enabled: viper.GetString("exa_api_key") != ""},
+		{name: "tavily", key: viper.GetString("tavily_api_key"), endpoint: viper.GetString("tavily_endpoint"), enabled: viper.GetString("tavily_api_key") != ""},
+	}
+	providers := make([]search.Provider, 0, len(configured))
+	for _, cfg := range configured {
+		if !cfg.enabled {
 			continue
 		}
-		p, err := configured.new(configured.key, configured.endpoint)
+		p, err := provider.New(cfg.name, cfg.key, cfg.endpoint)
 		if err != nil {
-			return nil, fmt.Errorf("%s provider: %w", configured.name, err)
+			return nil, fmt.Errorf("%s provider: %w", cfg.name, err)
 		}
 		providers = append(providers, resilience.Wrap(p, resilienceCfg))
 	}

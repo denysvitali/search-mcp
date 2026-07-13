@@ -1,4 +1,4 @@
-package provider
+package brave
 
 import (
 	"context"
@@ -9,8 +9,16 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/denysvitali/search-mcp/internal/provider"
+	"github.com/denysvitali/search-mcp/internal/provider/common"
 	"github.com/denysvitali/search-mcp/internal/search"
 )
+
+func init() {
+	provider.Register("brave", func(key, endpoint string) (search.Provider, error) {
+		return NewBraveChecked(key, endpoint)
+	})
+}
 
 const braveEndpoint = "https://api.search.brave.com/res/v1/web/search"
 
@@ -22,6 +30,8 @@ type Brave struct {
 	// Search can fail fast with a stable error.
 	keyErr error
 }
+
+var _ provider.Provider = (*Brave)(nil)
 
 // NewBrave constructs a Brave provider. The constructor signature is kept
 // backward compatible (it cannot return an error), so an empty/whitespace API
@@ -36,7 +46,7 @@ func NewBrave(apiKey string, endpoint ...string) *Brave {
 	b := &Brave{
 		apiKey:   apiKey,
 		endpoint: target,
-		client:   newHTTPClient(),
+		client:   common.NewHTTPClient(),
 	}
 	if strings.TrimSpace(apiKey) == "" {
 		b.keyErr = fmt.Errorf("brave api key is required")
@@ -85,7 +95,7 @@ func (b *Brave) Search(ctx context.Context, req search.Request) (search.Response
 	}
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("X-Subscription-Token", b.apiKey)
-	applyExtraHeaders(httpReq, req)
+	common.ApplyExtraHeaders(httpReq, req)
 
 	resp, err := b.client.Do(httpReq)
 	if err != nil {
@@ -101,7 +111,7 @@ func (b *Brave) Search(ctx context.Context, req search.Request) (search.Response
 	}
 
 	var payload braveResponse
-	if err := json.NewDecoder(limitedBody(resp.Body)).Decode(&payload); err != nil {
+	if err := json.NewDecoder(common.LimitedBody(resp.Body)).Decode(&payload); err != nil {
 		return search.Response{}, err
 	}
 

@@ -1,4 +1,4 @@
-package provider
+package mojeek
 
 import (
 	"context"
@@ -9,9 +9,17 @@ import (
 	"time"
 
 	"github.com/denysvitali/search-mcp/internal/htmlutil"
+	"github.com/denysvitali/search-mcp/internal/provider"
+	"github.com/denysvitali/search-mcp/internal/provider/common"
 	"github.com/denysvitali/search-mcp/internal/search"
 	"golang.org/x/net/html"
 )
+
+func init() {
+	provider.Register("mojeek", func(_, endpoint string) (search.Provider, error) {
+		return NewMojeek(endpoint), nil
+	})
+}
 
 const (
 	mojeekEndpoint  = "https://www.mojeek.com/search"
@@ -23,12 +31,14 @@ type Mojeek struct {
 	client   *http.Client
 }
 
+var _ provider.Provider = (*Mojeek)(nil)
+
 func NewMojeek(endpoint ...string) *Mojeek {
 	target := mojeekEndpoint
 	if len(endpoint) > 0 && endpoint[0] != "" {
 		target = endpoint[0]
 	}
-	return &Mojeek{endpoint: target, client: newHTTPClient()}
+	return &Mojeek{endpoint: target, client: common.NewHTTPClient()}
 }
 
 func (m *Mojeek) Name() string {
@@ -56,7 +66,7 @@ func (m *Mojeek) Search(ctx context.Context, req search.Request) (search.Respons
 	httpReq.Header.Set("User-Agent", mojeekUserAgent)
 	httpReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	httpReq.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	applyExtraHeaders(httpReq, req)
+	common.ApplyExtraHeaders(httpReq, req)
 
 	resp, err := m.client.Do(httpReq)
 	if err != nil {
@@ -65,7 +75,7 @@ func (m *Mojeek) Search(ctx context.Context, req search.Request) (search.Respons
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusForbidden {
-		return search.Response{}, fmt.Errorf("mojeek returned http 403; request blocked by upstream: %w", ErrBlocked)
+		return search.Response{}, fmt.Errorf("mojeek returned http 403; request blocked by upstream: %w", provider.ErrBlocked)
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return search.Response{}, fmt.Errorf("mojeek returned http 429; back off and retry later: %w", search.NewRateLimitedError(resp.Header))
@@ -74,7 +84,7 @@ func (m *Mojeek) Search(ctx context.Context, req search.Request) (search.Respons
 		return search.Response{}, fmt.Errorf("mojeek search failed: status %d", resp.StatusCode)
 	}
 
-	doc, err := html.Parse(limitedBody(resp.Body))
+	doc, err := html.Parse(common.LimitedBody(resp.Body))
 	if err != nil {
 		return search.Response{}, fmt.Errorf("parse mojeek html: %w", err)
 	}

@@ -2,6 +2,12 @@
 
 Go MCP server and CLI for web search.
 
+Provider implementations live in dedicated packages under `internal/provider/`
+(`duckduckgo`, `mojeek`, `yahoo`, `brave`, `searxng`, `kagi`, `exa`, and
+`tavily`). Each package implements `search.Provider` and registers its
+constructor from `init()`; the command imports the packages for registration
+and builds only the providers enabled by configuration.
+
 ## Providers
 
 - `duckduckgo`: scrapes `https://html.duckduckgo.com/html/` (the same endpoint the DuckDuckGo web UI uses). No API key required. DDG aggressively rate-limits datacenter IPs and serves an anomaly/captcha page after a few requests; the provider returns a clear error when this happens.

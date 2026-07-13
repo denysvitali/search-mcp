@@ -1,4 +1,4 @@
-package provider
+package yahoo
 
 import (
 	"context"
@@ -8,9 +8,17 @@ import (
 	"strings"
 
 	"github.com/denysvitali/search-mcp/internal/htmlutil"
+	"github.com/denysvitali/search-mcp/internal/provider"
+	"github.com/denysvitali/search-mcp/internal/provider/common"
 	"github.com/denysvitali/search-mcp/internal/search"
 	"golang.org/x/net/html"
 )
+
+func init() {
+	provider.Register("yahoo", func(_, endpoint string) (search.Provider, error) {
+		return NewYahoo(endpoint), nil
+	})
+}
 
 const (
 	yahooEndpoint  = "https://search.yahoo.com/search"
@@ -26,12 +34,14 @@ type Yahoo struct {
 	client   *http.Client
 }
 
+var _ provider.Provider = (*Yahoo)(nil)
+
 func NewYahoo(endpoint ...string) *Yahoo {
 	target := yahooEndpoint
 	if len(endpoint) > 0 && endpoint[0] != "" {
 		target = endpoint[0]
 	}
-	return &Yahoo{endpoint: target, client: newHTTPClient()}
+	return &Yahoo{endpoint: target, client: common.NewHTTPClient()}
 }
 
 func (y *Yahoo) Name() string { return "yahoo" }
@@ -49,7 +59,7 @@ func (y *Yahoo) Search(ctx context.Context, req search.Request) (search.Response
 	httpReq.Header.Set("User-Agent", yahooUserAgent)
 	httpReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	httpReq.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	applyExtraHeaders(httpReq, req)
+	common.ApplyExtraHeaders(httpReq, req)
 
 	resp, err := y.client.Do(httpReq)
 	if err != nil {
@@ -59,7 +69,7 @@ func (y *Yahoo) Search(ctx context.Context, req search.Request) (search.Response
 
 	switch resp.StatusCode {
 	case http.StatusForbidden:
-		return search.Response{}, fmt.Errorf("yahoo returned http 403; request blocked by upstream: %w", ErrBlocked)
+		return search.Response{}, fmt.Errorf("yahoo returned http 403; request blocked by upstream: %w", provider.ErrBlocked)
 	case http.StatusTooManyRequests:
 		return search.Response{}, fmt.Errorf("yahoo returned http 429: %w", search.NewRateLimitedError(resp.Header))
 	}
@@ -67,7 +77,7 @@ func (y *Yahoo) Search(ctx context.Context, req search.Request) (search.Response
 		return search.Response{}, fmt.Errorf("yahoo search failed: status %d", resp.StatusCode)
 	}
 
-	doc, err := html.Parse(limitedBody(resp.Body))
+	doc, err := html.Parse(common.LimitedBody(resp.Body))
 	if err != nil {
 		return search.Response{}, fmt.Errorf("parse yahoo html: %w", err)
 	}
