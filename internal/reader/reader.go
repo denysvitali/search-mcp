@@ -302,7 +302,7 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 			return "", fmt.Errorf("read response after Anubis challenge: %w", err)
 		}
 		if _, detectedAgain, _ := parseAnubisChallenge(body); detectedAgain {
-			return "", fmt.Errorf("Anubis challenge persisted after successful proof submission")
+			return "", fmt.Errorf("anubis challenge persisted after successful proof submission")
 		}
 	}
 

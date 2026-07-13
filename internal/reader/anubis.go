@@ -45,7 +45,7 @@ type anubisPageData struct {
 func parseAnubisChallenge(body []byte) (anubisPageData, bool, error) {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(body)))
 	if err != nil {
-		return anubisPageData{}, false, nil
+		return anubisPageData{}, true, fmt.Errorf("parse Anubis challenge HTML: %w", err)
 	}
 	challengeJSON := strings.TrimSpace(doc.Find("#" + anubisChallengeElement).First().Text())
 	if challengeJSON == "" {
@@ -63,13 +63,13 @@ func parseAnubisChallenge(body []byte) (anubisPageData, bool, error) {
 		}
 	}
 	if result.Challenge.ID == "" || result.Challenge.RandomData == "" || result.Rules.Difficulty <= 0 {
-		return result, true, fmt.Errorf("Anubis challenge is missing required fields")
+		return result, true, fmt.Errorf("anubis challenge is missing required fields")
 	}
 	if result.Rules.Algorithm != "fast" && result.Rules.Algorithm != "slow" {
 		return result, true, fmt.Errorf("unsupported Anubis algorithm %q", result.Rules.Algorithm)
 	}
 	if result.Rules.Difficulty > maxAnubisDifficulty {
-		return result, true, fmt.Errorf("Anubis difficulty %d exceeds safety limit %d", result.Rules.Difficulty, maxAnubisDifficulty)
+		return result, true, fmt.Errorf("anubis difficulty %d exceeds safety limit %d", result.Rules.Difficulty, maxAnubisDifficulty)
 	}
 	return result, true, nil
 }
@@ -93,11 +93,15 @@ func solveAnubisPoW(ctx context.Context, randomData string, difficulty int) (str
 	var stopped atomic.Bool
 	prefix := strings.Repeat("0", difficulty)
 
+	var workerTotal uint64
 	for worker := 0; worker < workers; worker++ {
+		workerTotal++
+	}
+	for worker := uint64(0); worker < workerTotal; worker++ {
 		wg.Add(1)
 		go func(start uint64) {
 			defer wg.Done()
-			step := uint64(workers)
+			step := workerTotal
 			for nonce := start; ; nonce += step {
 				if stopped.Load() || workCtx.Err() != nil {
 					return
@@ -111,7 +115,7 @@ func solveAnubisPoW(ctx context.Context, randomData string, difficulty int) (str
 					return
 				}
 			}
-		}(uint64(worker))
+		}(worker)
 	}
 
 	done := make(chan struct{})
@@ -124,7 +128,7 @@ func solveAnubisPoW(ctx context.Context, randomData string, difficulty int) (str
 		if err := workCtx.Err(); err != nil {
 			return "", 0, err
 		}
-		return "", 0, fmt.Errorf("Anubis proof-of-work stopped without a solution")
+		return "", 0, fmt.Errorf("anubis proof-of-work stopped without a solution")
 	case <-ctx.Done():
 		return "", 0, ctx.Err()
 	}
