@@ -140,6 +140,8 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 	}
 
 	var lastErr error
+	var emptyResp *Response
+	hadError := false
 	for i, name := range order {
 		// Respect context cancellation/deadlines before each attempt; do not fall
 		// back when the caller has already given up.
@@ -153,6 +155,16 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 		attempt := req
 		attempt.Provider = name
 		resp, err := s.searchOne(ctx, span, attempt)
+		if err == nil && len(resp.Results) == 0 {
+			// Public HTML providers sometimes answer bot mitigation with a
+			// syntactically valid page that contains no result nodes. An empty
+			// result is also legitimate, so retain it and try the remaining
+			// providers for recall rather than turning it into an error.
+			resp.Provider = name
+			emptyResp = &resp
+			s.logger.WithField("provider", name).Debug("provider returned no results; trying next provider")
+			continue
+		}
 		if err == nil {
 			if i > 0 {
 				// We only reach here past the primary when a fallback succeeded.
@@ -170,6 +182,7 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 		}
 
 		lastErr = err
+		hadError = true
 
 		// Only fall back on transient/blocked failures. Context errors and any
 		// other error return immediately. Surface the context's own error so
@@ -185,6 +198,9 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 		s.logger.WithError(err).WithFields(logrus.Fields{
 			"provider": name,
 		}).Warn("provider failed with fallback-worthy error; trying next provider")
+	}
+	if emptyResp != nil && !hadError {
+		return *emptyResp, nil
 	}
 
 	if lastErr == nil {

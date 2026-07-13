@@ -1,8 +1,10 @@
 package reader
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -40,7 +42,30 @@ func ExtractLinks(ctx context.Context, urlStr string) (string, error) {
 		return "", fmt.Errorf("cannot extract links from %s content", contentType)
 	}
 
-	doc, err := goquery.NewDocumentFromReader(limitedBody(resp.Body))
+	body, err := io.ReadAll(limitedBody(resp.Body))
+	if err != nil {
+		return "", fmt.Errorf("failed to read HTML: %w", err)
+	}
+	if challenge, detected, challengeErr := parseAnubisChallenge(body); detected {
+		if challengeErr != nil {
+			return "", challengeErr
+		}
+		resp.Body.Close()
+		resp, err = passAnubisChallenge(ctx, client, parsedURL.String(), challenge)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
+		}
+		body, err = io.ReadAll(limitedBody(resp.Body))
+		if err != nil {
+			return "", fmt.Errorf("read links page after Anubis challenge: %w", err)
+		}
+	}
+
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to parse HTML: %w", err)
 	}

@@ -16,6 +16,8 @@ type stubProvider struct {
 	err error
 	// lastReq captures the request the provider last received.
 	lastReq *Request
+	// empty makes Search succeed with no results.
+	empty bool
 }
 
 func (s *stubProvider) Name() string {
@@ -27,6 +29,9 @@ func (s *stubProvider) Search(ctx context.Context, req Request) (Response, error
 	if s.err != nil {
 		return Response{}, s.err
 	}
+	if s.empty {
+		return Response{Query: req.Query, Provider: s.name}, nil
+	}
 	return Response{
 		Query:    req.Query,
 		Provider: s.name,
@@ -36,6 +41,54 @@ func (s *stubProvider) Search(ctx context.Context, req Request) (Response, error
 			Source: s.name,
 		}},
 	}, nil
+}
+
+func TestServiceFallsBackOnEmptyResults(t *testing.T) {
+	primary := &stubProvider{name: "alpha", empty: true}
+	secondary := &stubProvider{name: "beta"}
+	service, err := NewService([]Provider{primary, secondary}, 100, 1, logrus.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := service.Search(context.Background(), Request{Query: "rare query", Provider: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Provider != "beta" {
+		t.Fatalf("provider = %q, want beta", resp.Provider)
+	}
+}
+
+func TestServiceReturnsEmptyResponseWhenAllProvidersAreEmpty(t *testing.T) {
+	first := &stubProvider{name: "alpha", empty: true}
+	second := &stubProvider{name: "beta", empty: true}
+	service, err := NewService([]Provider{first, second}, 100, 1, logrus.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := service.Search(context.Background(), Request{Query: "no matches"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Provider != "beta" {
+		t.Fatalf("provider = %q, want last attempted provider beta", resp.Provider)
+	}
+}
+
+func TestServiceDoesNotMaskProviderFailureWithEarlierEmptyResponse(t *testing.T) {
+	first := &stubProvider{name: "alpha", empty: true}
+	second := &stubProvider{name: "beta", err: fmt.Errorf("blocked: %w", ErrBlocked)}
+	service, err := NewService([]Provider{first, second}, 100, 1, logrus.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.Search(context.Background(), Request{Query: "test"})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("err = %v, want ErrBlocked instead of a silent empty response", err)
+	}
 }
 
 func TestServiceSearchUsesRequestedProvider(t *testing.T) {

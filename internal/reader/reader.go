@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"slices"
 	"sort"
@@ -129,7 +130,8 @@ func newHTTPClient() *http.Client {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: time.Second,
 	}
-	client := &http.Client{Timeout: defaultHTTPTimeout, Transport: transport}
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Timeout: defaultHTTPTimeout, Transport: transport, Jar: jar}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= maxHTTPRedirectCount {
 			return fmt.Errorf("too many redirects")
@@ -281,6 +283,27 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 	body, err := io.ReadAll(limitedBody(resp.Body))
 	if err != nil {
 		return "", fmt.Errorf("failed to read response body: %w", err)
+	}
+	if challenge, detected, challengeErr := parseAnubisChallenge(body); detected {
+		if challengeErr != nil {
+			return "", challengeErr
+		}
+		resp.Body.Close()
+		resp, err = passAnubisChallenge(ctx, client, urlStr, challenge)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
+		}
+		body, err = io.ReadAll(limitedBody(resp.Body))
+		if err != nil {
+			return "", fmt.Errorf("read response after Anubis challenge: %w", err)
+		}
+		if _, detectedAgain, _ := parseAnubisChallenge(body); detectedAgain {
+			return "", fmt.Errorf("Anubis challenge persisted after successful proof submission")
+		}
 	}
 
 	// Prefer the readability extraction: it strips navigation, footers, and

@@ -64,6 +64,9 @@ func (m *Mojeek) Search(ctx context.Context, req search.Request) (search.Respons
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusForbidden {
+		return search.Response{}, fmt.Errorf("mojeek returned http 403; request blocked by upstream: %w", ErrBlocked)
+	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return search.Response{}, fmt.Errorf("mojeek returned http 429; back off and retry later: %w", search.NewRateLimitedError(resp.Header))
 	}

@@ -44,7 +44,7 @@ const (
 // input schema from it and validates arguments before the handler runs.
 type searchArgs struct {
 	Query      string `json:"query" jsonschema:"Search query"`
-	Provider   string `json:"provider,omitempty" jsonschema:"Provider name: duckduckgo, mojeek, brave, searxng, kagi, exa, tavily, or all to fan out to every provider and merge rankings"`
+	Provider   string `json:"provider,omitempty" jsonschema:"Configured provider name, or all to fan out to every configured provider and merge rankings. Omit to use the server default."`
 	Count      *int   `json:"count,omitempty" jsonschema:"Maximum number of results"`
 	Country    string `json:"country,omitempty" jsonschema:"Provider country code"`
 	Language   string `json:"language,omitempty" jsonschema:"Provider language code"`
@@ -55,7 +55,7 @@ type searchArgs struct {
 // batchSearchArgs is the typed input for the search_batch tool.
 type batchSearchArgs struct {
 	Queries    []string `json:"queries" jsonschema:"Search queries to run in parallel, maximum 10"`
-	Provider   string   `json:"provider,omitempty" jsonschema:"Provider name: duckduckgo, mojeek, brave, searxng, kagi, exa, tavily, or all"`
+	Provider   string   `json:"provider,omitempty" jsonschema:"Configured provider name, or all to fan out to every configured provider. Omit to use the server default."`
 	Count      *int     `json:"count,omitempty" jsonschema:"Maximum number of results per query"`
 	Country    string   `json:"country,omitempty" jsonschema:"Provider country code"`
 	Language   string   `json:"language,omitempty" jsonschema:"Provider language code"`
@@ -73,6 +73,10 @@ type batchSearchResult struct {
 // maxBatchQueries caps how many queries one search_batch call may fan out.
 const maxBatchQueries = 10
 
+// maxBatchConcurrency avoids sending a burst of fallback requests when a
+// public HTML provider starts challenging clients.
+const maxBatchConcurrency = 2
+
 // runBatchSearch executes every query concurrently through the service; the
 // per-provider rate limiters still pace the actual provider calls.
 func runBatchSearch(ctx context.Context, service *searchdomain.Service, queries []string, base searchdomain.Request) batchSearchResult {
@@ -82,12 +86,20 @@ func runBatchSearch(ctx context.Context, service *searchdomain.Service, queries 
 		err   error
 	}
 	outcomes := make([]outcome, len(queries))
+	sem := make(chan struct{}, maxBatchConcurrency)
 
 	var wg sync.WaitGroup
 	for i, query := range queries {
 		wg.Add(1)
 		go func(i int, query string) {
 			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				outcomes[i] = outcome{query: query, err: ctx.Err()}
+				return
+			}
 			req := base
 			req.Query = query
 			resp, err := service.Search(ctx, req)

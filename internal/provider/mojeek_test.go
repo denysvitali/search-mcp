@@ -111,6 +111,22 @@ func TestMojeekSearchSurfacesRateLimit(t *testing.T) {
 	}
 }
 
+func TestMojeekSearchClassifiesForbiddenAsBlocked(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	m := NewMojeek(server.URL)
+	_, err := m.Search(context.Background(), search.Request{Query: "x"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("error = %v, want ErrBlocked", err)
+	}
+}
+
 func TestMojeekSafeSearch(t *testing.T) {
 	cases := []struct {
 		in, want string
