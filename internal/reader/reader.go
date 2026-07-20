@@ -87,6 +87,16 @@ func Read(ctx context.Context, urlStr string) (string, error) {
 	if isGitLabIssuableURL(parsedURL) {
 		return fetchGitLabContentAsMarkdown(ctx, client, parsedURL)
 	}
+	if isGerritChangeURL(parsedURL) {
+		return fetchGerritChangeAsMarkdown(ctx, client, parsedURL)
+	}
+	if isGitilesURL(parsedURL) {
+		// Fall through to the generic fetch if the Gitiles-specific routes
+		// all fail, e.g. on a URL that merely looks like a Gitiles object.
+		if markdown, err := fetchGitilesContentAsMarkdown(ctx, client, parsedURL); err == nil {
+			return markdown, nil
+		}
+	}
 	if isPkgGoDevURL(parsedURL) {
 		return fetchPkgGoDevContentAsMarkdown(ctx, client, parsedURL)
 	}

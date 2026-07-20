@@ -17,7 +17,8 @@ var githubRawBaseURL = "https://raw.githubusercontent.com"
 // codeFenceLanguages maps file extensions to Markdown fence hints.
 var codeFenceLanguages = map[string]string{
 	".go": "go", ".py": "python", ".js": "javascript", ".ts": "typescript",
-	".rs": "rust", ".c": "c", ".h": "c", ".cpp": "cpp", ".hpp": "cpp",
+	".rs": "rust", ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp",
+	".cxx": "cpp", ".hh": "cpp", ".hpp": "cpp",
 	".java": "java", ".rb": "ruby", ".sh": "bash", ".bash": "bash",
 	".yaml": "yaml", ".yml": "yaml", ".json": "json", ".toml": "toml",
 	".html": "html", ".css": "css", ".sql": "sql", ".proto": "proto",
