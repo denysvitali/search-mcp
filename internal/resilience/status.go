@@ -30,6 +30,10 @@ type BreakerStatus struct {
 	// CooldownRemaining is how long an open breaker stays open before the
 	// next half-open trial; zero otherwise.
 	CooldownRemaining time.Duration
+	// LastError is the most recent failure, or nil after a success. It explains
+	// why a provider is degraded — a silent captcha reads very differently from
+	// a transport timeout.
+	LastError error
 }
 
 // Status snapshots the breaker's current state.
@@ -37,7 +41,7 @@ func (c *CircuitBreaker) Status() BreakerStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	status := BreakerStatus{ConsecutiveFailures: c.failures}
+	status := BreakerStatus{ConsecutiveFailures: c.failures, LastError: c.lastErr}
 	switch c.state {
 	case stateOpen:
 		status.State = "open"

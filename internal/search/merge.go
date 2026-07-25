@@ -2,7 +2,7 @@ package search
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"net/url"
 	"slices"
 	"sort"
@@ -54,20 +54,25 @@ func (s *Service) searchAll(ctx context.Context, span trace.Span, req Request) (
 
 	var responses []Response
 	var errs []error
+	var degraded []ProviderFailure
 	for _, o := range outcomes {
 		if o.err != nil {
 			s.logger.WithError(o.err).WithField("provider", o.name).Warn("provider failed during fan-out")
-			errs = append(errs, o.err)
+			errs = append(errs, fmt.Errorf("%s: %w", o.name, o.err))
+			degraded = append(degraded, ProviderFailure{Provider: o.name, Error: o.err.Error()})
 			continue
 		}
 		responses = append(responses, o.resp)
 	}
 	if len(responses) == 0 {
-		return Response{}, errors.Join(errs...)
+		return Response{}, joinProviderErrors(errs)
+	}
+	if len(degraded) > 0 {
+		span.SetAttributes(attribute.Int("search.fanout.degraded", len(degraded)))
 	}
 
 	merged := fuseResults(responses, req.Count)
-	return Response{Query: req.Query, Provider: AllProviders, Results: merged}, nil
+	return Response{Query: req.Query, Provider: AllProviders, Results: merged, Degraded: degraded}, nil
 }
 
 // fuseResults merges per-provider rankings with reciprocal rank fusion:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,7 +69,7 @@ func TestServiceReturnsEmptyResponseWhenAllProvidersAreEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := service.Search(context.Background(), Request{Query: "no matches"})
+	resp, err := service.Search(context.Background(), Request{Query: "no matches", Provider: "alpha"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +86,7 @@ func TestServiceDoesNotMaskProviderFailureWithEarlierEmptyResponse(t *testing.T)
 		t.Fatal(err)
 	}
 
-	_, err = service.Search(context.Background(), Request{Query: "test"})
+	_, err = service.Search(context.Background(), Request{Query: "test", Provider: "alpha"})
 	if !errors.Is(err, ErrBlocked) {
 		t.Fatalf("err = %v, want ErrBlocked instead of a silent empty response", err)
 	}
@@ -207,7 +208,7 @@ func TestServiceFallsBackOnRateLimited(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			resp, err := service.Search(context.Background(), Request{Query: "test"})
+			resp, err := service.Search(context.Background(), Request{Query: "test", Provider: "alpha"})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -221,21 +222,112 @@ func TestServiceFallsBackOnRateLimited(t *testing.T) {
 	}
 }
 
-func TestServiceNoFallbackOnNonFallbackError(t *testing.T) {
-	wantErr := errors.New("query rejected")
-	primary := &stubProvider{name: "alpha", err: wantErr}
-	secondary := &stubProvider{name: "beta"}
+// TestServiceFallsBackOnGenericError covers the failure classes that are not
+// ErrRateLimited/ErrBlocked — upstream 5xx, transport blips, markup parse
+// failures, an open circuit breaker. These are per-provider conditions, so the
+// next provider must still be tried.
+func TestServiceFallsBackOnGenericError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"transport error", errors.New("request: unexpected EOF")},
+		{"upstream 5xx", errors.New("search failed: status 503")},
+		{"parse failure", errors.New("parse html: unexpected token")},
+		{"circuit breaker open", errors.New("alpha: circuit breaker open")},
+		// A provider's own HTTP client timeout wraps context.DeadlineExceeded.
+		// It must not be mistaken for the caller giving up: the caller's context
+		// is still healthy, and the next provider may well answer.
+		{"provider http timeout", fmt.Errorf(`request: Get "https://x": %w`, context.DeadlineExceeded)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			primary := &stubProvider{name: "alpha", err: tc.err}
+			secondary := &stubProvider{name: "beta"}
+			service, err := NewService([]Provider{primary, secondary}, 100, 1, logrus.New())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			resp, err := service.Search(context.Background(), Request{Query: "test", Provider: "alpha"})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if resp.Provider != "beta" {
+				t.Fatalf("provider = %q, want beta", resp.Provider)
+			}
+			if secondary.lastReq == nil {
+				t.Fatal("secondary should have been tried after the primary's generic failure")
+			}
+		})
+	}
+}
+
+// TestServiceAggregatesProviderErrors checks that a total failure names every
+// provider and its own reason, rather than reporting only the last attempt.
+func TestServiceAggregatesProviderErrors(t *testing.T) {
+	primary := &stubProvider{name: "alpha", err: errors.New("anomaly page")}
+	secondary := &stubProvider{name: "beta", err: errors.New("unexpected EOF")}
 	service, err := NewService([]Provider{primary, secondary}, 100, 1, logrus.New())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = service.Search(context.Background(), Request{Query: "test"})
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("err = %v, want %v", err, wantErr)
+	_, err = service.Search(context.Background(), Request{Query: "test", Provider: "alpha"})
+	if err == nil {
+		t.Fatal("expected error when all providers fail")
 	}
-	if secondary.lastReq != nil {
-		t.Fatal("secondary should not have been called on a non-fallback error")
+	for _, want := range []string{"alpha", "anomaly page", "beta", "unexpected EOF"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %q, want it to mention %q", err, want)
+		}
+	}
+}
+
+// TestServiceDefaultsToFanOut checks that omitting the provider queries every
+// configured backend instead of only the alphabetically first one.
+func TestServiceDefaultsToFanOut(t *testing.T) {
+	alpha := &stubProvider{name: "alpha"}
+	beta := &stubProvider{name: "beta"}
+	service, err := NewService([]Provider{alpha, beta}, 100, 1, logrus.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := service.Search(context.Background(), Request{Query: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Provider != AllProviders {
+		t.Fatalf("provider = %q, want %q", resp.Provider, AllProviders)
+	}
+	if alpha.lastReq == nil || beta.lastReq == nil {
+		t.Fatal("every provider should have been queried when none was requested")
+	}
+}
+
+// TestServiceFanOutReportsDegradedProviders checks that a partially failed
+// fan-out still returns results but names the providers that dropped out, so a
+// thin result set is not mistaken for a healthy one.
+func TestServiceFanOutReportsDegradedProviders(t *testing.T) {
+	alpha := &stubProvider{name: "alpha", err: fmt.Errorf("captcha: %w", ErrBlocked)}
+	beta := &stubProvider{name: "beta"}
+	service, err := NewService([]Provider{alpha, beta}, 100, 1, logrus.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := service.Search(context.Background(), Request{Query: "test", Provider: AllProviders})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) == 0 {
+		t.Fatal("expected the surviving provider's results")
+	}
+	if len(resp.Degraded) != 1 || resp.Degraded[0].Provider != "alpha" {
+		t.Fatalf("degraded = %+v, want a single entry for alpha", resp.Degraded)
+	}
+	if !strings.Contains(resp.Degraded[0].Error, "captcha") {
+		t.Fatalf("degraded error = %q, want it to carry the provider's reason", resp.Degraded[0].Error)
 	}
 }
 
@@ -250,7 +342,7 @@ func TestServiceNoFallbackOnContextCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = service.Search(ctx, Request{Query: "test"})
+	_, err = service.Search(ctx, Request{Query: "test", Provider: "alpha"})
 	if err == nil {
 		t.Fatal("expected error on cancelled context")
 	}
@@ -267,7 +359,7 @@ func TestServiceAllProvidersFailReturnsSentinel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = service.Search(context.Background(), Request{Query: "test"})
+	_, err = service.Search(context.Background(), Request{Query: "test", Provider: "alpha"})
 	if err == nil {
 		t.Fatal("expected error when all providers fail")
 	}

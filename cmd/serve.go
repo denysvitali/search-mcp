@@ -32,8 +32,10 @@ const (
 	// toolProviderStatus is the MCP tool name for provider health inspection.
 	toolProviderStatus = "provider_status"
 
-	// maxResultCount caps the requested result count to a sane upper bound.
-	maxResultCount = 100
+	// maxResultCount caps the requested result count. The keyless HTML backends
+	// carry roughly ten organic rows per page and page at most three deep, so a
+	// far higher ceiling would only advertise results that cannot be delivered.
+	maxResultCount = 50
 	// maxPDFContextLines bounds surrounding lines returned for each PDF match.
 	maxPDFContextLines = 10
 	// maxPDFResults bounds pages or matches returned by read_pdf.
@@ -44,8 +46,8 @@ const (
 // input schema from it and validates arguments before the handler runs.
 type searchArgs struct {
 	Query      string `json:"query" jsonschema:"Search query"`
-	Provider   string `json:"provider,omitempty" jsonschema:"Configured provider name, or all to fan out to every configured provider and merge rankings. Omit to use the server default."`
-	Count      *int   `json:"count,omitempty" jsonschema:"Maximum number of results"`
+	Provider   string `json:"provider,omitempty" jsonschema:"Configured provider name. Omit (recommended) to fan out to every configured provider and merge their rankings, which is the most resilient option; name one only to target a specific backend."`
+	Count      *int   `json:"count,omitempty" jsonschema:"Best-effort maximum number of results, up to 50. Keyless HTML backends carry about ten results per page and page three deep, so large values may return fewer."`
 	Country    string `json:"country,omitempty" jsonschema:"Provider country code"`
 	Language   string `json:"language,omitempty" jsonschema:"Provider language code"`
 	SafeSearch string `json:"safe_search,omitempty" jsonschema:"Provider safe search mode"`
@@ -55,8 +57,8 @@ type searchArgs struct {
 // batchSearchArgs is the typed input for the search_batch tool.
 type batchSearchArgs struct {
 	Queries    []string `json:"queries" jsonschema:"Search queries to run in parallel, maximum 10"`
-	Provider   string   `json:"provider,omitempty" jsonschema:"Configured provider name, or all to fan out to every configured provider. Omit to use the server default."`
-	Count      *int     `json:"count,omitempty" jsonschema:"Maximum number of results per query"`
+	Provider   string   `json:"provider,omitempty" jsonschema:"Configured provider name. Omit (recommended) to fan out to every configured provider and merge their rankings; name one only to target a specific backend."`
+	Count      *int     `json:"count,omitempty" jsonschema:"Best-effort maximum number of results per query, up to 50. Keyless HTML backends carry about ten results per page, so large values may return fewer."`
 	Country    string   `json:"country,omitempty" jsonschema:"Provider country code"`
 	Language   string   `json:"language,omitempty" jsonschema:"Provider language code"`
 	SafeSearch string   `json:"safe_search,omitempty" jsonschema:"Provider safe search mode"`
@@ -124,11 +126,17 @@ func runBatchSearch(ctx context.Context, service *searchdomain.Service, queries 
 
 // providerStatus reports one provider's health.
 type providerStatus struct {
-	Name                string  `json:"name"`
-	Breaker             string  `json:"breaker"`
-	ConsecutiveFailures int     `json:"consecutive_failures"`
-	CooldownRemaining   string  `json:"cooldown_remaining,omitempty"`
-	RateLimitTokens     float64 `json:"rate_limit_tokens"`
+	Name string `json:"name"`
+	// Healthy is false once the provider has a failure streak, so a caller can
+	// pick a working backend without interpreting breaker states.
+	Healthy             bool   `json:"healthy"`
+	Breaker             string `json:"breaker"`
+	ConsecutiveFailures int    `json:"consecutive_failures"`
+	CooldownRemaining   string `json:"cooldown_remaining,omitempty"`
+	// LastError explains why a provider is degraded — an anti-bot challenge
+	// reads very differently from a transport timeout.
+	LastError       string  `json:"last_error,omitempty"`
+	RateLimitTokens float64 `json:"rate_limit_tokens"`
 }
 
 type providerStatusResult struct {
@@ -140,13 +148,17 @@ type providerStatusResult struct {
 func collectProviderStatus(service *searchdomain.Service) providerStatusResult {
 	result := providerStatusResult{}
 	for _, name := range service.ProviderNames() {
-		status := providerStatus{Name: name, Breaker: "unknown"}
+		status := providerStatus{Name: name, Breaker: "unknown", Healthy: true}
 		if breaker := resilience.FindBreaker(service.Provider(name)); breaker != nil {
 			snapshot := breaker.Status()
 			status.Breaker = snapshot.State
 			status.ConsecutiveFailures = snapshot.ConsecutiveFailures
+			status.Healthy = snapshot.State == "closed" && snapshot.ConsecutiveFailures == 0
 			if snapshot.CooldownRemaining > 0 {
 				status.CooldownRemaining = snapshot.CooldownRemaining.Round(time.Millisecond).String()
+			}
+			if snapshot.LastError != nil {
+				status.LastError = snapshot.LastError.Error()
 			}
 		}
 		if tokens, ok := service.RateLimitTokens(name); ok {

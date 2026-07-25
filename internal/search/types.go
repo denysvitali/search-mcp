@@ -21,10 +21,22 @@ type Result struct {
 	Published   string `json:"published,omitempty"`
 }
 
+// ProviderFailure records a provider that could not be reached or refused to
+// answer during a fan-out search. It is reported alongside the results that the
+// surviving providers did return, so a thin result set is distinguishable from
+// a healthy search that genuinely found little.
+type ProviderFailure struct {
+	Provider string `json:"provider"`
+	Error    string `json:"error"`
+}
+
 type Response struct {
 	Query    string   `json:"query"`
 	Provider string   `json:"provider"`
 	Results  []Result `json:"results"`
+	// Degraded lists the providers that failed during a fan-out search. Empty
+	// when every provider answered.
+	Degraded []ProviderFailure `json:"degraded,omitempty"`
 }
 
 type Provider interface {

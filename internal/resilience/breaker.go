@@ -51,6 +51,9 @@ type CircuitBreaker struct {
 	failures     int
 	openedAt     time.Time
 	halfOpenBusy bool // a half-open trial is in flight
+	// lastErr is the most recent failure, retained so provider_status can report
+	// why a provider is degraded rather than only that it is.
+	lastErr error
 }
 
 // NewCircuitBreaker wraps inner with circuit-breaking behaviour.
@@ -133,8 +136,10 @@ func (c *CircuitBreaker) afterCall(err error) {
 		}
 		c.state = stateClosed
 		c.failures = 0
+		c.lastErr = nil
 		return
 	}
+	c.lastErr = err
 
 	switch c.state {
 	case stateHalfOpen:

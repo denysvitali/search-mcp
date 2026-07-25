@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/denysvitali/search-mcp/internal/provider"
@@ -61,7 +62,48 @@ func searxngTimeRange(freshness string) string {
 	return ""
 }
 
+// searxngMaxPages caps how deep a single search pages through an instance. Most
+// public instances are volunteer-run and rate limit aggressively.
+const searxngMaxPages = 3
+
+// Search pages through the instance's results until it has req.Count of them.
+// A SearXNG page carries roughly ten results, so without paging a larger request
+// silently came back short.
 func (s *SearXNG) Search(ctx context.Context, req search.Request) (search.Response, error) {
+	count := req.Count
+	if count <= 0 {
+		count = 10
+	}
+
+	var results []search.Result
+	seen := make(map[string]struct{}, count)
+	for page := 1; page <= searxngMaxPages && len(results) < count; page++ {
+		pageResults, err := s.searchPage(ctx, req, page)
+		if err != nil {
+			if page > 1 && len(results) > 0 {
+				break
+			}
+			return search.Response{}, err
+		}
+		if len(pageResults) == 0 {
+			break
+		}
+		for _, r := range pageResults {
+			if _, dup := seen[r.URL]; dup {
+				continue
+			}
+			seen[r.URL] = struct{}{}
+			results = append(results, r)
+			if len(results) >= count {
+				break
+			}
+		}
+	}
+
+	return search.Response{Query: req.Query, Provider: s.Name(), Results: results}, nil
+}
+
+func (s *SearXNG) searchPage(ctx context.Context, req search.Request, page int) ([]search.Result, error) {
 	values := url.Values{}
 	values.Set("q", req.Query)
 	values.Set("format", "json")
@@ -79,41 +121,41 @@ func (s *SearXNG) Search(ctx context.Context, req search.Request) (search.Respon
 	if timeRange := searxngTimeRange(req.Freshness); timeRange != "" {
 		values.Set("time_range", timeRange)
 	}
+	if page > 1 {
+		values.Set("pageno", strconv.Itoa(page))
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+"/search?"+values.Encode(), nil)
 	if err != nil {
-		return search.Response{}, err
+		return nil, err
 	}
 	httpReq.Header.Set("Accept", "application/json")
 	common.ApplyExtraHeaders(httpReq, req)
 
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return search.Response{}, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests:
-		return search.Response{}, fmt.Errorf("searxng returned http 429: %w", search.NewRateLimitedError(resp.Header))
+		return nil, fmt.Errorf("searxng returned http 429: %w", search.NewRateLimitedError(resp.Header))
 	case resp.StatusCode == http.StatusForbidden:
 		// Instances without the json format enabled answer 403; treat it as
 		// blocked so the service can fall through to another provider.
-		return search.Response{}, fmt.Errorf("searxng returned http 403 (is format=json enabled?): %w", provider.ErrBlocked)
+		return nil, fmt.Errorf("searxng returned http 403 (is format=json enabled?): %w", provider.ErrBlocked)
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
-		return search.Response{}, fmt.Errorf("searxng search failed: %s", resp.Status)
+		return nil, fmt.Errorf("searxng search failed: %s", resp.Status)
 	}
 
 	var payload searxngResponse
 	if err := json.NewDecoder(common.LimitedBody(resp.Body)).Decode(&payload); err != nil {
-		return search.Response{}, err
+		return nil, err
 	}
 
 	results := make([]search.Result, 0, len(payload.Results))
 	for _, item := range payload.Results {
-		if req.Count > 0 && len(results) >= req.Count {
-			break
-		}
 		results = append(results, search.Result{
 			Title:       item.Title,
 			URL:         item.URL,
@@ -123,7 +165,7 @@ func (s *SearXNG) Search(ctx context.Context, req search.Request) (search.Respon
 		})
 	}
 
-	return search.Response{Query: req.Query, Provider: s.Name(), Results: results}, nil
+	return results, nil
 }
 
 type searxngResponse struct {

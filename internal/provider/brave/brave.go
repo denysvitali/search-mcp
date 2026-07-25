@@ -22,6 +22,14 @@ func init() {
 
 const braveEndpoint = "https://api.search.brave.com/res/v1/web/search"
 
+// braveMaxCount is the largest `count` Brave's web search API accepts. Sending
+// more is rejected with a 422, so the value is clamped rather than passed
+// through — a caller asking for 50 should get Brave's maximum, not an error.
+const braveMaxCount = 20
+
+// braveMaxOffset is the highest page offset Brave accepts (0-9).
+const braveMaxOffset = 9
+
 type Brave struct {
 	apiKey   string
 	endpoint string
@@ -68,14 +76,64 @@ func (b *Brave) Name() string {
 	return "brave"
 }
 
+// braveCount clamps a requested result count into the range Brave's API accepts.
+func braveCount(count int) int {
+	if count <= 0 {
+		return 10
+	}
+	return min(count, braveMaxCount)
+}
+
+// Search fetches results from Brave, paging with `offset` when the caller wants
+// more than one page holds. Each page is a separate billed API call, so paging
+// only kicks in above braveMaxCount — an ordinary request stays a single call.
 func (b *Brave) Search(ctx context.Context, req search.Request) (search.Response, error) {
 	if b.keyErr != nil {
 		return search.Response{}, b.keyErr
 	}
 
+	count := req.Count
+	if count <= 0 {
+		count = 10
+	}
+
+	var results []search.Result
+	seen := make(map[string]struct{}, count)
+	for offset := 0; offset <= braveMaxOffset && len(results) < count; offset++ {
+		page, err := b.searchPage(ctx, req, offset)
+		if err != nil {
+			if offset > 0 && len(results) > 0 {
+				break
+			}
+			return search.Response{}, err
+		}
+		for _, r := range page {
+			if _, dup := seen[r.URL]; dup {
+				continue
+			}
+			seen[r.URL] = struct{}{}
+			results = append(results, r)
+			if len(results) >= count {
+				break
+			}
+		}
+		// A page shorter than the page size means the index is exhausted.
+		// Continuing would spend billed API calls on empty responses.
+		if len(page) < braveCount(req.Count) {
+			break
+		}
+	}
+
+	return search.Response{Query: req.Query, Provider: b.Name(), Results: results}, nil
+}
+
+func (b *Brave) searchPage(ctx context.Context, req search.Request, offset int) ([]search.Result, error) {
 	values := url.Values{}
 	values.Set("q", req.Query)
-	values.Set("count", strconv.Itoa(req.Count))
+	values.Set("count", strconv.Itoa(braveCount(req.Count)))
+	if offset > 0 {
+		values.Set("offset", strconv.Itoa(offset))
+	}
 	if req.Country != "" {
 		values.Set("country", req.Country)
 	}
@@ -91,7 +149,7 @@ func (b *Brave) Search(ctx context.Context, req search.Request) (search.Response
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, b.endpoint+"?"+values.Encode(), nil)
 	if err != nil {
-		return search.Response{}, err
+		return nil, err
 	}
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("X-Subscription-Token", b.apiKey)
@@ -99,20 +157,20 @@ func (b *Brave) Search(ctx context.Context, req search.Request) (search.Response
 
 	resp, err := b.client.Do(httpReq)
 	if err != nil {
-		return search.Response{}, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return search.Response{}, fmt.Errorf("brave returned http 429: %w", search.NewRateLimitedError(resp.Header))
+		return nil, fmt.Errorf("brave returned http 429: %w", search.NewRateLimitedError(resp.Header))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return search.Response{}, fmt.Errorf("brave search failed: %s", resp.Status)
+		return nil, fmt.Errorf("brave search failed: %s", resp.Status)
 	}
 
 	var payload braveResponse
 	if err := json.NewDecoder(common.LimitedBody(resp.Body)).Decode(&payload); err != nil {
-		return search.Response{}, err
+		return nil, err
 	}
 
 	results := make([]search.Result, 0, len(payload.Web.Results))
@@ -126,7 +184,7 @@ func (b *Brave) Search(ctx context.Context, req search.Request) (search.Response
 		})
 	}
 
-	return search.Response{Query: req.Query, Provider: b.Name(), Results: results}, nil
+	return results, nil
 }
 
 type braveResponse struct {

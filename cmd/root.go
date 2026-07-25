@@ -13,6 +13,7 @@ import (
 	_ "github.com/denysvitali/search-mcp/internal/provider/duckduckgo"
 	_ "github.com/denysvitali/search-mcp/internal/provider/exa"
 	_ "github.com/denysvitali/search-mcp/internal/provider/kagi"
+	_ "github.com/denysvitali/search-mcp/internal/provider/marginalia"
 	_ "github.com/denysvitali/search-mcp/internal/provider/mojeek"
 	_ "github.com/denysvitali/search-mcp/internal/provider/searxng"
 	_ "github.com/denysvitali/search-mcp/internal/provider/tavily"
@@ -30,6 +31,10 @@ var (
 	rootCmd = &cobra.Command{
 		Use:   "search-mcp",
 		Short: "Search the web from CLI or MCP",
+		// Errors are printed once by Execute; without these cobra prints them a
+		// second time and appends the full usage block to every failed search.
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if showVersion, _ := cmd.Flags().GetBool("version"); showVersion {
 				fmt.Fprintln(cmd.OutOrStdout(), version)
@@ -54,7 +59,8 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	rootCmd.PersistentFlags().String("config", "", "config file")
-	rootCmd.PersistentFlags().String("provider", "", "search provider")
+	rootCmd.PersistentFlags().String("provider", "", "search provider for a single query (\"all\" fans out; empty fans out too)")
+	rootCmd.PersistentFlags().StringSlice("providers", defaultKeylessProviders, "keyless providers to enable (keyed providers are enabled by their API key)")
 	rootCmd.PersistentFlags().String("brave-api-key", "", "Brave Search API key")
 	rootCmd.PersistentFlags().String("brave-endpoint", "", "Brave Search API endpoint")
 	rootCmd.PersistentFlags().String("kagi-api-key", "", "Kagi Search API key")
@@ -64,6 +70,7 @@ func init() {
 	rootCmd.PersistentFlags().String("tavily-api-key", "", "Tavily Search API key")
 	rootCmd.PersistentFlags().String("tavily-endpoint", "", "Tavily Search API endpoint")
 	rootCmd.PersistentFlags().String("duckduckgo-endpoint", "", "DuckDuckGo HTML search endpoint")
+	rootCmd.PersistentFlags().String("marginalia-endpoint", "", "Marginalia public search API endpoint")
 	rootCmd.PersistentFlags().String("mojeek-endpoint", "", "Mojeek search HTML endpoint")
 	rootCmd.PersistentFlags().String("yahoo-endpoint", "", "Yahoo search HTML endpoint")
 	rootCmd.PersistentFlags().String("searxng-url", "", "SearXNG instance URL (enables the searxng provider)")
@@ -73,7 +80,7 @@ func init() {
 	rootCmd.PersistentFlags().Duration("retry-base-delay", 200*time.Millisecond, "base delay for retry exponential backoff")
 	rootCmd.PersistentFlags().Int("breaker-threshold", 5, "consecutive failures before a provider's circuit opens")
 	rootCmd.PersistentFlags().Duration("breaker-cooldown", 30*time.Second, "open-circuit cooldown before a half-open trial")
-	rootCmd.PersistentFlags().Duration("cache-ttl", 0, "in-memory result cache TTL (0 disables caching)")
+	rootCmd.PersistentFlags().Duration("cache-ttl", 5*time.Minute, "in-memory result cache TTL (0 disables caching)")
 	rootCmd.PersistentFlags().Duration("web-cache-ttl", 15*time.Minute, "in-memory web_read page cache TTL (0 disables caching)")
 	rootCmd.PersistentFlags().String("web-cache-dir", "", "directory for the persistent web_read page cache (empty disables persistence)")
 	rootCmd.PersistentFlags().StringSlice("allow-domains", nil, "if set, web_read may only fetch these domains (and their subdomains)")
@@ -86,6 +93,7 @@ func init() {
 
 	_ = viper.BindPFlag("config", rootCmd.PersistentFlags().Lookup("config"))
 	_ = viper.BindPFlag("provider", rootCmd.PersistentFlags().Lookup("provider"))
+	_ = viper.BindPFlag("providers", rootCmd.PersistentFlags().Lookup("providers"))
 	_ = viper.BindPFlag("brave_api_key", rootCmd.PersistentFlags().Lookup("brave-api-key"))
 	_ = viper.BindPFlag("brave_endpoint", rootCmd.PersistentFlags().Lookup("brave-endpoint"))
 	_ = viper.BindPFlag("kagi_api_key", rootCmd.PersistentFlags().Lookup("kagi-api-key"))
@@ -95,6 +103,7 @@ func init() {
 	_ = viper.BindPFlag("tavily_api_key", rootCmd.PersistentFlags().Lookup("tavily-api-key"))
 	_ = viper.BindPFlag("tavily_endpoint", rootCmd.PersistentFlags().Lookup("tavily-endpoint"))
 	_ = viper.BindPFlag("duckduckgo_endpoint", rootCmd.PersistentFlags().Lookup("duckduckgo-endpoint"))
+	_ = viper.BindPFlag("marginalia_endpoint", rootCmd.PersistentFlags().Lookup("marginalia-endpoint"))
 	_ = viper.BindPFlag("mojeek_endpoint", rootCmd.PersistentFlags().Lookup("mojeek-endpoint"))
 	_ = viper.BindPFlag("yahoo_endpoint", rootCmd.PersistentFlags().Lookup("yahoo-endpoint"))
 	_ = viper.BindPFlag("searxng_url", rootCmd.PersistentFlags().Lookup("searxng-url"))
@@ -166,6 +175,35 @@ func newLogger() logrus.FieldLogger {
 	return logger
 }
 
+// defaultKeylessProviders is the no-API-key provider set enabled out of the box.
+//
+// Mojeek is deliberately absent: it answers a datacenter IP with an HTTP 200
+// captcha page regardless of User-Agent, so leaving it on costs a wasted round
+// trip on every search while contributing nothing. It stays available via
+// --providers for anyone searching from an IP it does serve.
+var defaultKeylessProviders = []string{"duckduckgo", "marginalia", "yahoo"}
+
+// keylessProviderSet resolves the --providers list into a lookup set.
+//
+// Entries are split on commas as well as on slice boundaries: viper hands a
+// SEARCH_MCP_PROVIDERS env var through as a single string, so "a,b" would
+// otherwise arrive as one unmatchable name.
+func keylessProviderSet() map[string]bool {
+	names := viper.GetStringSlice("providers")
+	if len(names) == 0 {
+		names = defaultKeylessProviders
+	}
+	set := make(map[string]bool, len(names))
+	for _, entry := range names {
+		for name := range strings.SplitSeq(entry, ",") {
+			if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
+				set[name] = true
+			}
+		}
+	}
+	return set
+}
+
 func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
 	resilienceCfg := resilience.Config{
 		RetryMaxAttempts: viper.GetInt("retry_max_attempts"),
@@ -175,13 +213,15 @@ func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
 		CacheTTL:         viper.GetDuration("cache_ttl"),
 	}
 
+	enabledKeyless := keylessProviderSet()
 	configured := []struct {
 		name, key, endpoint string
 		enabled             bool
 	}{
-		{name: "duckduckgo", endpoint: viper.GetString("duckduckgo_endpoint"), enabled: true},
-		{name: "mojeek", endpoint: viper.GetString("mojeek_endpoint"), enabled: true},
-		{name: "yahoo", endpoint: viper.GetString("yahoo_endpoint"), enabled: true},
+		{name: "duckduckgo", endpoint: viper.GetString("duckduckgo_endpoint"), enabled: enabledKeyless["duckduckgo"]},
+		{name: "marginalia", endpoint: viper.GetString("marginalia_endpoint"), enabled: enabledKeyless["marginalia"]},
+		{name: "mojeek", endpoint: viper.GetString("mojeek_endpoint"), enabled: enabledKeyless["mojeek"]},
+		{name: "yahoo", endpoint: viper.GetString("yahoo_endpoint"), enabled: enabledKeyless["yahoo"]},
 		{name: "brave", key: viper.GetString("brave_api_key"), endpoint: viper.GetString("brave_endpoint"), enabled: viper.GetString("brave_api_key") != ""},
 		{name: "searxng", endpoint: viper.GetString("searxng_url"), enabled: viper.GetString("searxng_url") != ""},
 		{name: "kagi", key: viper.GetString("kagi_api_key"), endpoint: viper.GetString("kagi_endpoint"), enabled: viper.GetString("kagi_api_key") != ""},

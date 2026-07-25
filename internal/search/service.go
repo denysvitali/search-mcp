@@ -108,11 +108,14 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 		req.Count = 10
 	}
 	if req.Provider == "" {
-		names := s.ProviderNames()
-		if len(names) == 0 {
+		// With no provider requested, fan out to every configured provider and
+		// merge the rankings. Each public backend fails independently and often
+		// (anti-bot challenges, transport blips), so querying all of them is what
+		// keeps a search useful when any single one is unavailable.
+		if len(s.providers) == 0 {
 			return Response{}, errors.New("no providers configured")
 		}
-		req.Provider = names[0]
+		req.Provider = AllProviders
 	}
 
 	if req.Provider == AllProviders {
@@ -139,15 +142,15 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 		}
 	}
 
-	var lastErr error
+	var errs []error
 	var emptyResp *Response
 	hadError := false
 	for i, name := range order {
 		// Respect context cancellation/deadlines before each attempt; do not fall
 		// back when the caller has already given up.
 		if err := ctx.Err(); err != nil {
-			if lastErr != nil {
-				return Response{}, lastErr
+			if len(errs) > 0 {
+				return Response{}, joinProviderErrors(errs)
 			}
 			return Response{}, err
 		}
@@ -181,38 +184,40 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 			return resp, nil
 		}
 
-		lastErr = err
+		errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		hadError = true
 
-		// Only fall back on transient/blocked failures. Context errors and any
-		// other error return immediately. Surface the context's own error so
-		// the real cancellation/deadline reason is not masked by the provider
-		// error that the cancellation triggered.
+		// The caller's context is the only thing that stops the chain. Surface
+		// its own error so the real cancellation/deadline reason is not masked
+		// by the provider error the cancellation triggered.
+		//
+		// Everything else falls through to the next provider. Note that the
+		// error alone cannot decide this: a provider's own HTTP client timeout
+		// wraps context.DeadlineExceeded too, and that is a per-provider fault
+		// the next provider may well not share.
 		if ctx.Err() != nil {
 			return Response{}, ctx.Err()
-		}
-		if !isFallbackWorthy(err) {
-			return Response{}, err
 		}
 
 		s.logger.WithError(err).WithFields(logrus.Fields{
 			"provider": name,
-		}).Warn("provider failed with fallback-worthy error; trying next provider")
+		}).Warn("provider failed; trying next provider")
 	}
 	if emptyResp != nil && !hadError {
 		return *emptyResp, nil
 	}
 
-	if lastErr == nil {
-		lastErr = errors.New("no providers attempted")
+	if len(errs) == 0 {
+		return Response{}, errors.New("all providers failed: no providers attempted")
 	}
-	return Response{}, fmt.Errorf("all providers failed: %w", lastErr)
+	return Response{}, joinProviderErrors(errs)
 }
 
-// isFallbackWorthy reports whether err is a transient/blocked failure that
-// should trigger trying the next provider.
-func isFallbackWorthy(err error) bool {
-	return errors.Is(err, ErrRateLimited) || errors.Is(err, ErrBlocked)
+// joinProviderErrors wraps every provider failure into a single error so the
+// caller sees each provider's own reason instead of only whichever attempt
+// happened to run last.
+func joinProviderErrors(errs []error) error {
+	return fmt.Errorf("all providers failed: %w", errors.Join(errs...))
 }
 
 // searchOne applies the provider's rate limiter and performs a single provider

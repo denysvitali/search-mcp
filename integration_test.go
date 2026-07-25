@@ -34,7 +34,7 @@ func TestIntegrationCLIWebSearch(t *testing.T) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binary, "search", "integration query", "--provider", "duckduckgo", "--count", "2", "--json")
-	cmd.Env = append(os.Environ(), "SEARCH_MCP_DUCKDUCKGO_ENDPOINT="+mockSearch.URL)
+	cmd.Env = append(os.Environ(), mockOnlyEnv(mockSearch)...)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -56,7 +56,7 @@ func TestIntegrationMCPWebSearchTool(t *testing.T) {
 	defer cancel()
 
 	serverCmd := exec.Command(binary, "serve")
-	serverCmd.Env = append(os.Environ(), "SEARCH_MCP_DUCKDUCKGO_ENDPOINT="+mockSearch.URL)
+	serverCmd.Env = append(os.Environ(), mockOnlyEnv(mockSearch)...)
 
 	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "integration-test", Version: "1.0.0"}, nil)
 	session, err := mcpClient.Connect(ctx, &mcp.CommandTransport{Command: serverCmd}, nil)
@@ -88,6 +88,62 @@ func TestIntegrationMCPWebSearchTool(t *testing.T) {
 	assertSearchResponse(t, resp)
 }
 
+// TestIntegrationSearchDefaultsToFanOut checks the end-to-end default: with no
+// provider named, the search fans out across every configured backend and
+// reports the ones that failed instead of silently returning a thin result set.
+func TestIntegrationSearchDefaultsToFanOut(t *testing.T) {
+	binary := buildBinary(t)
+	mockSearch := newDuckDuckGoMock(t)
+	// A second keyless provider that is always blocked, so the run exercises both
+	// the merge path and the degraded-provider reporting.
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(blocked.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binary, "search", "integration query", "--count", "2", "--json")
+	cmd.Env = append(os.Environ(),
+		"SEARCH_MCP_DUCKDUCKGO_ENDPOINT="+mockSearch.URL,
+		"SEARCH_MCP_MARGINALIA_ENDPOINT="+blocked.URL,
+		"SEARCH_MCP_PROVIDERS=duckduckgo,marginalia",
+	)
+
+	// stdout only: the degraded provider also logs a warning to stderr, which
+	// would otherwise be interleaved into the JSON payload.
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("search command failed: %v\n%s", err, output)
+	}
+
+	var resp struct {
+		Provider string `json:"provider"`
+		Results  []struct {
+			URL    string `json:"url"`
+			Source string `json:"source"`
+		} `json:"results"`
+		Degraded []struct {
+			Provider string `json:"provider"`
+			Error    string `json:"error"`
+		} `json:"degraded"`
+	}
+	if err := json.Unmarshal(output, &resp); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+
+	if resp.Provider != "all" {
+		t.Fatalf("provider = %q, want all", resp.Provider)
+	}
+	if len(resp.Results) != 2 {
+		t.Fatalf("results = %d, want the surviving provider's 2 rows", len(resp.Results))
+	}
+	if len(resp.Degraded) != 1 || resp.Degraded[0].Provider != "marginalia" {
+		t.Fatalf("degraded = %+v, want a single marginalia entry", resp.Degraded)
+	}
+}
+
 func TestIntegrationMCPHTTPTransport(t *testing.T) {
 	binary := buildBinary(t)
 	mockSearch := newDuckDuckGoMock(t)
@@ -100,7 +156,7 @@ func TestIntegrationMCPHTTPTransport(t *testing.T) {
 	_ = listener.Close()
 
 	serverCmd := exec.Command(binary, "serve", "--http", addr)
-	serverCmd.Env = append(os.Environ(), "SEARCH_MCP_DUCKDUCKGO_ENDPOINT="+mockSearch.URL)
+	serverCmd.Env = append(os.Environ(), mockOnlyEnv(mockSearch)...)
 	if err := serverCmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
@@ -168,6 +224,16 @@ func buildBinary(t *testing.T) string {
 	return binary
 }
 
+// mockOnlyEnv points DuckDuckGo at the mock and narrows the keyless provider set
+// to just DuckDuckGo. Without the narrowing these tests would fan out to the
+// real Marginalia and Yahoo backends, making them non-hermetic and flaky.
+func mockOnlyEnv(mockSearch *httptest.Server) []string {
+	return []string{
+		"SEARCH_MCP_DUCKDUCKGO_ENDPOINT=" + mockSearch.URL,
+		"SEARCH_MCP_PROVIDERS=duckduckgo",
+	}
+}
+
 func newDuckDuckGoMock(t *testing.T) *httptest.Server {
 	t.Helper()
 
@@ -188,7 +254,10 @@ func newDuckDuckGoMock(t *testing.T) *httptest.Server {
 			t.Errorf("referer = %q, want https://html.duckduckgo.com/", got)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// div#links.results is the real page's results container. The provider
+		// treats its absence as a block, so the mock must reproduce it.
 		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>
+<div id="links" class="results">
 <div class="result results_links results_links_deep web-result">
   <div class="links_main links_deep result__body">
     <h2 class="result__title"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2Fintegration&amp;rut=abc">Integration Result</a></h2>
@@ -200,6 +269,7 @@ func newDuckDuckGoMock(t *testing.T) *httptest.Server {
     <h2 class="result__title"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2Fsecond">Second Result</a></h2>
     <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2Fsecond">Second snippet.</a>
   </div>
+</div>
 </div>
 </body></html>`))
 	}))

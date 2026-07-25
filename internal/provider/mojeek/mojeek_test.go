@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/denysvitali/search-mcp/internal/provider"
@@ -20,6 +22,43 @@ const mojeekFixture = `<!DOCTYPE html><html><body>
 </ul>
 </div>
 </body></html>`
+
+// TestMojeekCapturedCaptchaIsBlocked replays the real interstitial Mojeek serves
+// to a fingerprinted client: HTTP 200, valid HTML, <title>Captcha</title>, and no
+// result rows. Before this was detected the provider reported a successful
+// search with zero results, so the circuit breaker never opened and every query
+// kept paying a wasted round trip to a provider that could never answer.
+func TestMojeekCapturedCaptchaIsBlocked(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("testdata", "captcha.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	_, err = NewMojeek(server.URL).Search(context.Background(), search.Request{Query: "x"})
+	if !errors.Is(err, provider.ErrBlocked) {
+		t.Fatalf("error = %v, want ErrBlocked for a 200 captcha page", err)
+	}
+}
+
+// TestMojeekMissingContainerIsBlocked covers markup drift: a 200 that parses but
+// has no results list must fail loudly rather than report zero results.
+func TestMojeekMissingContainerIsBlocked(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body><div class="results"></div></body></html>`))
+	}))
+	defer server.Close()
+
+	_, err := NewMojeek(server.URL).Search(context.Background(), search.Request{Query: "x"})
+	if !errors.Is(err, provider.ErrBlocked) {
+		t.Fatalf("error = %v, want ErrBlocked when the results list is gone", err)
+	}
+}
 
 func TestMojeekSearchParsesResults(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

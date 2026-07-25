@@ -1,8 +1,10 @@
 package mojeek
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -84,7 +86,19 @@ func (m *Mojeek) Search(ctx context.Context, req search.Request) (search.Respons
 		return search.Response{}, fmt.Errorf("mojeek search failed: status %d", resp.StatusCode)
 	}
 
-	doc, err := html.Parse(common.LimitedBody(resp.Body))
+	body, err := io.ReadAll(common.LimitedBody(resp.Body))
+	if err != nil {
+		return search.Response{}, fmt.Errorf("read mojeek response: %w", err)
+	}
+
+	// Mojeek answers a fingerprinted client with HTTP 200 and a captcha page.
+	// Without this check the parse below finds no result rows and the search
+	// silently reports "no results" while the provider is in fact unusable.
+	if common.IsChallengePage(body) {
+		return search.Response{}, common.ErrChallenge("mojeek")
+	}
+
+	doc, err := html.Parse(bytes.NewReader(body))
 	if err != nil {
 		return search.Response{}, fmt.Errorf("parse mojeek html: %w", err)
 	}
@@ -93,7 +107,10 @@ func (m *Mojeek) Search(ctx context.Context, req search.Request) (search.Respons
 	if count <= 0 {
 		count = 10
 	}
-	results := extractMojeekResults(doc, count)
+	results, found := extractMojeekResults(doc, count)
+	if !found {
+		return search.Response{}, common.ErrMissingResultsContainer("mojeek", "ul.results-standard")
+	}
 
 	return search.Response{Query: req.Query, Provider: m.Name(), Results: results}, nil
 }
@@ -125,12 +142,15 @@ func mojeekSince(freshness string) string {
 	return t.Format("20060102")
 }
 
-func extractMojeekResults(root *html.Node, limit int) []search.Result {
+// extractMojeekResults parses the result rows and reports whether the results
+// list was present at all, so a captcha or a markup change is distinguishable
+// from a query that genuinely matched nothing.
+func extractMojeekResults(root *html.Node, limit int) ([]search.Result, bool) {
 	resultsList := htmlutil.FindElement(root, func(n *html.Node) bool {
 		return n.Data == "ul" && htmlutil.HasClass(n, "results-standard")
 	})
 	if resultsList == nil {
-		return nil
+		return nil, false
 	}
 
 	results := make([]search.Result, 0, limit)
@@ -142,7 +162,7 @@ func extractMojeekResults(root *html.Node, limit int) []search.Result {
 			results = append(results, r)
 		}
 	}
-	return results
+	return results, true
 }
 
 func parseMojeekResult(li *html.Node) (search.Result, bool) {

@@ -56,6 +56,9 @@ func (d *DuckDuckGo) Search(ctx context.Context, req search.Request) (search.Res
 	if df := duckFreshness(req.Freshness); df != "" {
 		form.Set("df", df)
 	}
+	if kp := duckSafeSearch(req.SafeSearch); kp != "" {
+		form.Set("kp", kp)
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, d.endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -80,8 +83,14 @@ func (d *DuckDuckGo) Search(ctx context.Context, req search.Request) (search.Res
 	// Status 202 with an "anomaly" body is DDG's soft block; the more common
 	// failure mode is a 200 that still contains anomaly.js. Treat both as the
 	// same condition so callers fall back to another provider.
-	if isDuckAnomaly(body) {
-		return search.Response{}, fmt.Errorf("duckduckgo served anomaly page; source ip rate-limited or fingerprinted: %w", provider.ErrBlocked)
+	if common.IsChallengePage(body) {
+		return search.Response{}, common.ErrChallenge("duckduckgo")
+	}
+	switch resp.StatusCode {
+	case http.StatusForbidden:
+		return search.Response{}, fmt.Errorf("duckduckgo returned http 403; request blocked by upstream: %w", provider.ErrBlocked)
+	case http.StatusTooManyRequests:
+		return search.Response{}, fmt.Errorf("duckduckgo returned http 429: %w", search.NewRateLimitedError(resp.Header))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return search.Response{}, fmt.Errorf("duckduckgo search failed: status %d", resp.StatusCode)
@@ -96,7 +105,13 @@ func (d *DuckDuckGo) Search(ctx context.Context, req search.Request) (search.Res
 	if count <= 0 {
 		count = 10
 	}
-	results := extractDuckResults(doc, count)
+	results, found := extractDuckResults(doc, count)
+	if !found {
+		// A genuine zero-match query still renders div.results with a "No results
+		// found" notice, so a missing container means an unrecognised block or
+		// markup drift rather than an empty result set.
+		return search.Response{}, common.ErrMissingResultsContainer("duckduckgo", "div.results")
+	}
 
 	return search.Response{Query: req.Query, Provider: d.Name(), Results: results}, nil
 }
@@ -120,10 +135,23 @@ func duckDuckGoHeaders() map[string]string {
 	}
 }
 
-func isDuckAnomaly(body []byte) bool {
-	return bytes.Contains(body, []byte("anomaly.js")) || bytes.Contains(body, []byte("/anomaly/"))
+// duckSafeSearch maps the request's safe-search mode onto DuckDuckGo's kp
+// parameter (-2 off, -1 moderate, 1 strict). Without it the request carried no
+// safe-search preference at all and always got the endpoint's default.
+func duckSafeSearch(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "off", "0", "none":
+		return "-2"
+	case "moderate", "1", "medium":
+		return "-1"
+	case "strict", "2", "on", "high":
+		return "1"
+	}
+	return ""
 }
 
+// duckRegion builds DuckDuckGo's kl region code, which is "<language>-<country>"
+// — for example "en-uk" or the worldwide default "wt-wt".
 func duckRegion(country, language string) string {
 	country = strings.ToLower(strings.TrimSpace(country))
 	language = strings.ToLower(strings.TrimSpace(language))
@@ -131,9 +159,14 @@ func duckRegion(country, language string) string {
 	case country != "" && language != "":
 		return language + "-" + country
 	case country != "":
-		return "us-" + country
+		// A bare country needs a language half. "en" is the safe partner; the
+		// previous "us-" prefix produced nonsense like "us-us", which DuckDuckGo
+		// does not recognise as a region.
+		return "en-" + country
 	case language != "":
-		return language + "-us"
+		// A bare language means "this language, anywhere": wt is DuckDuckGo's
+		// worldwide region.
+		return language + "-wt"
 	}
 	return ""
 }
@@ -152,7 +185,17 @@ func duckFreshness(freshness string) string {
 	return ""
 }
 
-func extractDuckResults(root *html.Node, limit int) []search.Result {
+// extractDuckResults parses the result rows and reports whether the page's
+// results container was present at all. The second return value distinguishes
+// "this query matched nothing" from "this is not a result page".
+func extractDuckResults(root *html.Node, limit int) ([]search.Result, bool) {
+	container := htmlutil.FindElement(root, func(n *html.Node) bool {
+		return n.Data == "div" && htmlutil.HasClass(n, "results")
+	})
+	if container == nil {
+		return nil, false
+	}
+
 	results := make([]search.Result, 0, limit)
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
@@ -169,8 +212,8 @@ func extractDuckResults(root *html.Node, limit int) []search.Result {
 			walk(c)
 		}
 	}
-	walk(root)
-	return results
+	walk(container)
+	return results, true
 }
 
 func parseDuckResult(node *html.Node) (search.Result, bool) {
@@ -201,11 +244,16 @@ func parseDuckResult(node *html.Node) (search.Result, bool) {
 		snippet = strings.TrimSpace(htmlutil.TextContent(div))
 	}
 
+	// DuckDuckGo prefixes dated results' snippets with the publication date
+	// rather than exposing it as a field; lift it into Published.
+	published, snippet := search.SplitPublished(snippet)
+
 	return search.Result{
 		Title:       title,
 		URL:         href,
 		Description: snippet,
 		Source:      "duckduckgo",
+		Published:   published,
 	}, true
 }
 

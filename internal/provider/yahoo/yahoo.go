@@ -1,11 +1,15 @@
 package yahoo
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/denysvitali/search-mcp/internal/htmlutil"
 	"github.com/denysvitali/search-mcp/internal/provider"
@@ -23,6 +27,18 @@ func init() {
 const (
 	yahooEndpoint  = "https://search.yahoo.com/search"
 	yahooUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+
+	// yahooResultsPerPage is how many organic rows a single Yahoo SERP holds.
+	// It drives the 1-based `b` offset used to page through results.
+	yahooResultsPerPage = 10
+	// yahooMaxPages caps how deep a single search will page. Yahoo returns
+	// progressively less relevant results and each extra page is another request
+	// against an endpoint that rate-limits aggressively.
+	yahooMaxPages = 3
+	// yahooPageDelay spaces out consecutive page fetches. The service's rate
+	// limiter is applied once per Search call, so without this the extra pages
+	// would burst through unthrottled.
+	yahooPageDelay = 250 * time.Millisecond
 )
 
 // Yahoo searches Yahoo's public HTML results. It provides a useful third
@@ -46,15 +62,67 @@ func NewYahoo(endpoint ...string) *Yahoo {
 
 func (y *Yahoo) Name() string { return "yahoo" }
 
+// Search pages through Yahoo's SERP until it has req.Count results. A single
+// page only carries around eight organic rows, so without paging any request for
+// more than that silently came back short.
 func (y *Yahoo) Search(ctx context.Context, req search.Request) (search.Response, error) {
+	count := req.Count
+	if count <= 0 {
+		count = 10
+	}
+
+	var results []search.Result
+	seen := make(map[string]struct{}, count)
+	for page := 0; page < yahooMaxPages && len(results) < count; page++ {
+		if page > 0 {
+			select {
+			case <-ctx.Done():
+				return search.Response{}, ctx.Err()
+			case <-time.After(yahooPageDelay):
+			}
+		}
+
+		pageResults, err := y.searchPage(ctx, req, page, count)
+		if err != nil {
+			// Later pages are a bonus: keep whatever the earlier ones produced
+			// rather than failing a search that already has usable results.
+			if page > 0 && len(results) > 0 {
+				break
+			}
+			return search.Response{}, err
+		}
+		if len(pageResults) == 0 {
+			break
+		}
+		for _, r := range pageResults {
+			if _, dup := seen[r.URL]; dup {
+				continue
+			}
+			seen[r.URL] = struct{}{}
+			results = append(results, r)
+			if len(results) >= count {
+				break
+			}
+		}
+	}
+
+	return search.Response{Query: req.Query, Provider: y.Name(), Results: results}, nil
+}
+
+// searchPage fetches a single SERP. page is 0-based; Yahoo's `b` offset is
+// 1-based, so page 1 starts at b=11.
+func (y *Yahoo) searchPage(ctx context.Context, req search.Request, page, count int) ([]search.Result, error) {
 	values := url.Values{"p": {req.Query}}
 	if req.Language != "" {
 		values.Set("vl", strings.ToLower(strings.TrimSpace(req.Language)))
 	}
+	if page > 0 {
+		values.Set("b", strconv.Itoa(page*yahooResultsPerPage+1))
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, y.endpoint+"?"+values.Encode(), nil)
 	if err != nil {
-		return search.Response{}, err
+		return nil, err
 	}
 	httpReq.Header.Set("User-Agent", yahooUserAgent)
 	httpReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -63,32 +131,50 @@ func (y *Yahoo) Search(ctx context.Context, req search.Request) (search.Response
 
 	resp, err := y.client.Do(httpReq)
 	if err != nil {
-		return search.Response{}, fmt.Errorf("yahoo request: %w", err)
+		return nil, fmt.Errorf("yahoo request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
 	case http.StatusForbidden:
-		return search.Response{}, fmt.Errorf("yahoo returned http 403; request blocked by upstream: %w", provider.ErrBlocked)
+		return nil, fmt.Errorf("yahoo returned http 403; request blocked by upstream: %w", provider.ErrBlocked)
 	case http.StatusTooManyRequests:
-		return search.Response{}, fmt.Errorf("yahoo returned http 429: %w", search.NewRateLimitedError(resp.Header))
+		return nil, fmt.Errorf("yahoo returned http 429: %w", search.NewRateLimitedError(resp.Header))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return search.Response{}, fmt.Errorf("yahoo search failed: status %d", resp.StatusCode)
+		return nil, fmt.Errorf("yahoo search failed: status %d", resp.StatusCode)
 	}
 
-	doc, err := html.Parse(common.LimitedBody(resp.Body))
+	body, err := io.ReadAll(common.LimitedBody(resp.Body))
 	if err != nil {
-		return search.Response{}, fmt.Errorf("parse yahoo html: %w", err)
+		return nil, fmt.Errorf("read yahoo response: %w", err)
 	}
-	count := req.Count
-	if count <= 0 {
-		count = 10
+	if common.IsChallengePage(body) {
+		return nil, common.ErrChallenge("yahoo")
 	}
-	return search.Response{Query: req.Query, Provider: y.Name(), Results: extractYahooResults(doc, count)}, nil
+
+	doc, err := html.Parse(bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("parse yahoo html: %w", err)
+	}
+	results, found := extractYahooResults(doc, count)
+	if !found {
+		return nil, common.ErrMissingResultsContainer("yahoo", "#web")
+	}
+	return results, nil
 }
 
-func extractYahooResults(root *html.Node, limit int) []search.Result {
+// extractYahooResults parses the organic result rows and reports whether the
+// web-results container was present, so a challenge page or markup drift is
+// distinguishable from a query that genuinely matched nothing.
+func extractYahooResults(root *html.Node, limit int) ([]search.Result, bool) {
+	container := htmlutil.FindElement(root, func(n *html.Node) bool {
+		return htmlutil.Attr(n, "id") == "web"
+	})
+	if container == nil {
+		return nil, false
+	}
+
 	results := make([]search.Result, 0, limit)
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
@@ -105,8 +191,8 @@ func extractYahooResults(root *html.Node, limit int) []search.Result {
 			walk(child)
 		}
 	}
-	walk(root)
-	return results
+	walk(container)
+	return results, true
 }
 
 func parseYahooResult(node *html.Node) (search.Result, bool) {
@@ -132,7 +218,11 @@ func parseYahooResult(node *html.Node) (search.Result, bool) {
 	}); text != nil {
 		snippet = htmlutil.CollapseWhitespace(htmlutil.TextContent(text))
 	}
-	return search.Result{Title: title, URL: href, Description: snippet, Source: "yahoo"}, true
+	// Yahoo prefixes the snippet with the page's date ("Jul 16, 2025 · …")
+	// instead of exposing it as a field; lift it into Published so callers can
+	// judge how current a result is.
+	published, snippet := search.SplitPublished(snippet)
+	return search.Result{Title: title, URL: href, Description: snippet, Source: "yahoo", Published: published}, true
 }
 
 func unwrapYahooURL(href string) string {
