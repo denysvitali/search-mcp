@@ -88,6 +88,52 @@ func TestIntegrationMCPWebSearchTool(t *testing.T) {
 	assertSearchResponse(t, resp)
 }
 
+func TestIntegrationMCPBatchPreservesDuplicateFailures(t *testing.T) {
+	binary := buildBinary(t)
+	mockSearch := newDuckDuckGoMock(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	serverCmd := exec.Command(binary, "serve")
+	serverCmd.Env = append(os.Environ(), mockOnlyEnv(mockSearch)...)
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "integration-test", Version: "1.0.0"}, nil)
+	session, err := mcpClient.Connect(ctx, &mcp.CommandTransport{Command: serverCmd}, nil)
+	if err != nil {
+		t.Fatalf("connect mcp client: %v", err)
+	}
+	defer session.Close()
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "search_batch",
+		Arguments: map[string]any{
+			"queries":  []string{"duplicate", "duplicate"},
+			"provider": "missing",
+		},
+	})
+	if err != nil {
+		t.Fatalf("call search_batch: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("search_batch returned error: %#v", result.Content)
+	}
+	var payload struct {
+		Items []struct {
+			Query string `json:"query"`
+			Error string `json:"error"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(toolStructured(t, result)), &payload); err != nil {
+		t.Fatalf("decode batch result: %v", err)
+	}
+	if len(payload.Items) != 2 || payload.Items[0].Query != "duplicate" || payload.Items[1].Query != "duplicate" {
+		t.Fatalf("items = %+v, want two ordered duplicate entries", payload.Items)
+	}
+	if payload.Items[0].Error == "" || payload.Items[1].Error == "" {
+		t.Fatalf("items = %+v, want an error for each duplicate", payload.Items)
+	}
+}
+
 // TestIntegrationSearchDefaultsToFanOut checks the end-to-end default: with no
 // provider named, the search fans out across every configured backend and
 // reports the ones that failed instead of silently returning a thin result set.
@@ -302,8 +348,11 @@ func assertSearchResponse(t *testing.T, resp searchResponse) {
 
 func toolStructured(t *testing.T, result *mcp.CallToolResult) string {
 	t.Helper()
-	if len(result.Content) != 0 {
-		t.Fatalf("structured tool result unexpectedly has text content: %#v", result.Content)
+	if len(result.Content) != 1 {
+		t.Fatalf("structured tool result should include one compatibility text block: %#v", result.Content)
+	}
+	if text, ok := result.Content[0].(*mcp.TextContent); !ok || text.Text == "" {
+		t.Fatalf("structured tool result compatibility block = %#v", result.Content[0])
 	}
 	data, err := json.Marshal(result.StructuredContent)
 	if err != nil {

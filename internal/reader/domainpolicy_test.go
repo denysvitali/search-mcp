@@ -2,6 +2,7 @@ package reader
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -46,5 +47,26 @@ func TestDomainPolicy(t *testing.T) {
 		if _, err := validateURL("https://anything.test/x"); err != nil {
 			t.Errorf("empty policy refused: %v", err)
 		}
+		if parsed, err := validateURL("HTTPS://anything.test/x"); err != nil || parsed.Scheme != "https" {
+			t.Errorf("uppercase scheme validation = %v, %v; want normalized https", parsed, err)
+		}
 	})
+}
+
+func TestRedirectHonorsDomainPolicy(t *testing.T) {
+	t.Cleanup(func() { SetDomainPolicy(nil, nil) })
+	SetDomainPolicy([]string{"allowed.example"}, []string{"blocked.example"})
+
+	client := newHTTPClient()
+	redirect, err := http.NewRequest(http.MethodGet, "https://blocked.example/redirected", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CheckRedirect(redirect, nil); err == nil || !strings.Contains(err.Error(), "blocklist") {
+		t.Fatalf("redirect error = %v, want blocklist rejection", err)
+	}
+
+	if _, err := validateURL("https://blocked.example./resource"); err == nil || !strings.Contains(err.Error(), "blocklist") {
+		t.Fatalf("trailing-dot blocked host error = %v, want blocklist rejection", err)
+	}
 }

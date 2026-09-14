@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -28,12 +29,42 @@ type Service struct {
 	requests metric.Int64Counter
 	// latency records search request durations in milliseconds. May be nil if instrument creation failed.
 	latency metric.Float64Histogram
+	// providerTimeout bounds one provider attempt, including its rate-limit wait.
+	// A zero value disables the per-provider deadline.
+	providerTimeout time.Duration
+}
+
+// ServiceOptions configures a Service without forcing callers to grow the
+// positional NewService constructor every time a reliability knob is added.
+type ServiceOptions struct {
+	RequestsPerSecond float64
+	Burst             int
+	ProviderTimeout   time.Duration
+	Logger            logrus.FieldLogger
 }
 
 func NewService(providers []Provider, requestsPerSecond float64, burst int, logger logrus.FieldLogger) (*Service, error) {
+	return NewServiceWithOptions(providers, ServiceOptions{
+		RequestsPerSecond: requestsPerSecond,
+		Burst:             burst,
+		Logger:            logger,
+	})
+}
+
+// NewServiceWithOptions constructs a search service with explicit operational
+// limits. ProviderTimeout is deliberately separate from the HTTP client's
+// timeout: it also bounds rate-limit waits and gives fan-out a predictable
+// maximum latency per backend.
+func NewServiceWithOptions(providers []Provider, opts ServiceOptions) (*Service, error) {
 	if len(providers) == 0 {
 		return nil, errors.New("at least one provider is required")
 	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = logrus.New()
+	}
+	requestsPerSecond := opts.RequestsPerSecond
+	burst := opts.Burst
 	if requestsPerSecond <= 0 {
 		requestsPerSecond = 1
 	}
@@ -54,12 +85,13 @@ func NewService(providers []Provider, requestsPerSecond float64, burst int, logg
 	}
 
 	s := &Service{
-		providers: make(map[string]Provider, len(providers)),
-		limiters:  make(map[string]*rate.Limiter, len(providers)),
-		logger:    logger,
-		tracer:    otel.Tracer("search-mcp/search"),
-		requests:  requests,
-		latency:   latency,
+		providers:       make(map[string]Provider, len(providers)),
+		limiters:        make(map[string]*rate.Limiter, len(providers)),
+		logger:          logger,
+		tracer:          otel.Tracer("search-mcp/search"),
+		requests:        requests,
+		latency:         latency,
+		providerTimeout: opts.ProviderTimeout,
 	}
 
 	for _, provider := range providers {
@@ -101,9 +133,11 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 	ctx, span := s.tracer.Start(ctx, "search")
 	defer span.End()
 
+	req.Query = strings.TrimSpace(req.Query)
 	if req.Query == "" {
 		return Response{}, errors.New("query is required")
 	}
+	req.Provider = strings.ToLower(strings.TrimSpace(req.Provider))
 	if req.Count <= 0 {
 		req.Count = 10
 	}
@@ -149,9 +183,6 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 		// Respect context cancellation/deadlines before each attempt; do not fall
 		// back when the caller has already given up.
 		if err := ctx.Err(); err != nil {
-			if len(errs) > 0 {
-				return Response{}, joinProviderErrors(errs)
-			}
 			return Response{}, err
 		}
 
@@ -225,6 +256,11 @@ func joinProviderErrors(errs []error) error {
 // provider and must already be validated by the caller.
 func (s *Service) searchOne(ctx context.Context, span trace.Span, req Request) (Response, error) {
 	provider := s.providers[req.Provider]
+	if s.providerTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.providerTimeout)
+		defer cancel()
+	}
 
 	attrs := []attribute.KeyValue{
 		attribute.String("search.provider", req.Provider),

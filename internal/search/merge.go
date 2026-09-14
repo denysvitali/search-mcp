@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"slices"
 	"sort"
@@ -90,6 +91,25 @@ func fuseResults(responses []Response, count int) []Result {
 
 	for _, resp := range responses {
 		for rank, result := range resp.Results {
+			result.Title = strings.TrimSpace(result.Title)
+			result.URL = strings.TrimSpace(result.URL)
+			if result.URL == "" {
+				// A malformed row should not consume a rank or leak an unusable
+				// result into the merged response.
+				continue
+			}
+			parsed, err := url.Parse(result.URL)
+			if err != nil || parsed.Host == "" || (strings.ToLower(parsed.Scheme) != "http" && strings.ToLower(parsed.Scheme) != "https") {
+				// Provider APIs occasionally leak an internal relative link or a
+				// malformed redirect. Keep the merged contract absolute and safe.
+				continue
+			}
+			if result.Title == "" {
+				// Keep a usable schema-valid row when a provider omits its title.
+				// The URL is a better fallback than silently dropping an otherwise
+				// valuable hit.
+				result.Title = result.URL
+			}
 			key := normalizeResultURL(result.URL)
 			entry, ok := byURL[key]
 			if !ok {
@@ -120,18 +140,38 @@ func fuseResults(responses []Response, count int) []Result {
 	return results
 }
 
-// normalizeResultURL folds trivial URL variations (scheme, host case,
-// trailing slash, fragment) so the same document from two providers
-// deduplicates.
-func normalizeResultURL(raw string) string {
+// NormalizeResultURL folds trivial URL variations and common analytics
+// parameters so the same document from multiple providers deduplicates.
+// Tracking parameters are intentionally limited to well-known analytics keys;
+// arbitrary query parameters can be part of the document identity.
+func NormalizeResultURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
 		return strings.ToLower(raw)
 	}
 	u.Scheme = "https"
-	u.Host = strings.ToLower(u.Host)
+	host := strings.ToLower(u.Hostname())
+	host = strings.TrimPrefix(host, "www.")
+	if port := u.Port(); port != "" && port != "80" && port != "443" {
+		host = net.JoinHostPort(host, port)
+	}
+	u.Host = host
 	u.Fragment = ""
 	u.Path = strings.TrimRight(u.Path, "/")
+	query := u.Query()
+	for key := range query {
+		lower := strings.ToLower(key)
+		if strings.HasPrefix(lower, "utm_") || slices.Contains([]string{
+			"gclid", "dclid", "fbclid", "msclkid", "mc_cid", "mc_eid",
+		}, lower) {
+			query.Del(key)
+		}
+	}
+	u.RawQuery = query.Encode()
 	return u.String()
 }
+
+// normalizeResultURL keeps the package-private name used by older tests and
+// callers inside this package.
+func normalizeResultURL(raw string) string { return NormalizeResultURL(raw) }

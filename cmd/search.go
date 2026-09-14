@@ -34,10 +34,16 @@ var searchCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		resp, err := service.Search(ctx, search.Request{
+		count, err := clampCount(viper.GetInt("count"))
+		if err != nil {
+			return err
+		}
+		searchCtx, cancel := withConfiguredTimeout(ctx, viper.GetDuration("search_timeout"))
+		defer cancel()
+		resp, err := service.Search(searchCtx, search.Request{
 			Query:      args[0],
 			Provider:   viper.GetString("provider"),
-			Count:      viper.GetInt("count"),
+			Count:      count,
 			Country:    viper.GetString("country"),
 			Language:   viper.GetString("language"),
 			SafeSearch: viper.GetString("safe_search"),

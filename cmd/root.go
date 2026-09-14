@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,9 +10,11 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/denysvitali/search-mcp/internal/provider"
+	_ "github.com/denysvitali/search-mcp/internal/provider/bing"
 	_ "github.com/denysvitali/search-mcp/internal/provider/brave"
 	_ "github.com/denysvitali/search-mcp/internal/provider/duckduckgo"
 	_ "github.com/denysvitali/search-mcp/internal/provider/exa"
+	_ "github.com/denysvitali/search-mcp/internal/provider/google"
 	_ "github.com/denysvitali/search-mcp/internal/provider/kagi"
 	_ "github.com/denysvitali/search-mcp/internal/provider/marginalia"
 	_ "github.com/denysvitali/search-mcp/internal/provider/mojeek"
@@ -70,12 +73,18 @@ func init() {
 	rootCmd.PersistentFlags().String("tavily-api-key", "", "Tavily Search API key")
 	rootCmd.PersistentFlags().String("tavily-endpoint", "", "Tavily Search API endpoint")
 	rootCmd.PersistentFlags().String("duckduckgo-endpoint", "", "DuckDuckGo HTML search endpoint")
+	rootCmd.PersistentFlags().String("bing-endpoint", "", "Bing HTML search endpoint")
+	rootCmd.PersistentFlags().String("google-endpoint", "", "Google HTML search endpoint")
 	rootCmd.PersistentFlags().String("marginalia-endpoint", "", "Marginalia public search API endpoint")
 	rootCmd.PersistentFlags().String("mojeek-endpoint", "", "Mojeek search HTML endpoint")
 	rootCmd.PersistentFlags().String("yahoo-endpoint", "", "Yahoo search HTML endpoint")
 	rootCmd.PersistentFlags().String("searxng-url", "", "SearXNG instance URL (enables the searxng provider)")
 	rootCmd.PersistentFlags().Float64("rate-rps", 1, "requests per second per provider")
 	rootCmd.PersistentFlags().Int("rate-burst", 2, "rate limit burst per provider")
+	rootCmd.PersistentFlags().Duration("provider-timeout", 8*time.Second, "maximum time for one provider attempt")
+	rootCmd.PersistentFlags().Duration("search-timeout", 30*time.Second, "maximum time for one search request")
+	rootCmd.PersistentFlags().Duration("batch-timeout", 60*time.Second, "maximum time for a search_batch request")
+	rootCmd.PersistentFlags().Duration("read-timeout", 30*time.Second, "maximum time for one web_read or read_pdf request")
 	rootCmd.PersistentFlags().Int("retry-max-attempts", 3, "max attempts per provider on transient failures")
 	rootCmd.PersistentFlags().Duration("retry-base-delay", 200*time.Millisecond, "base delay for retry exponential backoff")
 	rootCmd.PersistentFlags().Int("breaker-threshold", 5, "consecutive failures before a provider's circuit opens")
@@ -90,6 +99,7 @@ func init() {
 	rootCmd.PersistentFlags().String("otel-endpoint", "", "OTLP exporter endpoint (overrides OTEL_EXPORTER_OTLP_ENDPOINT)")
 	rootCmd.PersistentFlags().String("log-level", "info", "log level")
 	rootCmd.PersistentFlags().Bool("version", false, "print version and exit")
+	rootCmd.PersistentFlags().String("http-token", "", "bearer token required for non-loopback HTTP MCP serving")
 
 	_ = viper.BindPFlag("config", rootCmd.PersistentFlags().Lookup("config"))
 	_ = viper.BindPFlag("provider", rootCmd.PersistentFlags().Lookup("provider"))
@@ -103,12 +113,18 @@ func init() {
 	_ = viper.BindPFlag("tavily_api_key", rootCmd.PersistentFlags().Lookup("tavily-api-key"))
 	_ = viper.BindPFlag("tavily_endpoint", rootCmd.PersistentFlags().Lookup("tavily-endpoint"))
 	_ = viper.BindPFlag("duckduckgo_endpoint", rootCmd.PersistentFlags().Lookup("duckduckgo-endpoint"))
+	_ = viper.BindPFlag("bing_endpoint", rootCmd.PersistentFlags().Lookup("bing-endpoint"))
+	_ = viper.BindPFlag("google_endpoint", rootCmd.PersistentFlags().Lookup("google-endpoint"))
 	_ = viper.BindPFlag("marginalia_endpoint", rootCmd.PersistentFlags().Lookup("marginalia-endpoint"))
 	_ = viper.BindPFlag("mojeek_endpoint", rootCmd.PersistentFlags().Lookup("mojeek-endpoint"))
 	_ = viper.BindPFlag("yahoo_endpoint", rootCmd.PersistentFlags().Lookup("yahoo-endpoint"))
 	_ = viper.BindPFlag("searxng_url", rootCmd.PersistentFlags().Lookup("searxng-url"))
 	_ = viper.BindPFlag("rate_rps", rootCmd.PersistentFlags().Lookup("rate-rps"))
 	_ = viper.BindPFlag("rate_burst", rootCmd.PersistentFlags().Lookup("rate-burst"))
+	_ = viper.BindPFlag("provider_timeout", rootCmd.PersistentFlags().Lookup("provider-timeout"))
+	_ = viper.BindPFlag("search_timeout", rootCmd.PersistentFlags().Lookup("search-timeout"))
+	_ = viper.BindPFlag("batch_timeout", rootCmd.PersistentFlags().Lookup("batch-timeout"))
+	_ = viper.BindPFlag("read_timeout", rootCmd.PersistentFlags().Lookup("read-timeout"))
 	_ = viper.BindPFlag("retry_max_attempts", rootCmd.PersistentFlags().Lookup("retry-max-attempts"))
 	_ = viper.BindPFlag("retry_base_delay", rootCmd.PersistentFlags().Lookup("retry-base-delay"))
 	_ = viper.BindPFlag("breaker_threshold", rootCmd.PersistentFlags().Lookup("breaker-threshold"))
@@ -122,6 +138,7 @@ func init() {
 	_ = viper.BindPFlag("otel_exporter", rootCmd.PersistentFlags().Lookup("otel-exporter"))
 	_ = viper.BindPFlag("otel_endpoint", rootCmd.PersistentFlags().Lookup("otel-endpoint"))
 	_ = viper.BindPFlag("log_level", rootCmd.PersistentFlags().Lookup("log-level"))
+	_ = viper.BindPFlag("http_token", rootCmd.PersistentFlags().Lookup("http-token"))
 
 	viper.SetEnvPrefix("SEARCH_MCP")
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_", ".", "_"))
@@ -177,11 +194,12 @@ func newLogger() logrus.FieldLogger {
 
 // defaultKeylessProviders is the no-API-key provider set enabled out of the box.
 //
+// Google is opt-in: it answers many datacenter IPs with a JavaScript challenge.
 // Mojeek is deliberately absent: it answers a datacenter IP with an HTTP 200
 // captcha page regardless of User-Agent, so leaving it on costs a wasted round
 // trip on every search while contributing nothing. It stays available via
 // --providers for anyone searching from an IP it does serve.
-var defaultKeylessProviders = []string{"duckduckgo", "marginalia", "yahoo"}
+var defaultKeylessProviders = []string{"duckduckgo", "bing", "yahoo"}
 
 // keylessProviderSet resolves the --providers list into a lookup set.
 //
@@ -219,6 +237,8 @@ func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
 		enabled             bool
 	}{
 		{name: "duckduckgo", endpoint: viper.GetString("duckduckgo_endpoint"), enabled: enabledKeyless["duckduckgo"]},
+		{name: "bing", endpoint: viper.GetString("bing_endpoint"), enabled: enabledKeyless["bing"]},
+		{name: "google", endpoint: viper.GetString("google_endpoint"), enabled: enabledKeyless["google"]},
 		{name: "marginalia", endpoint: viper.GetString("marginalia_endpoint"), enabled: enabledKeyless["marginalia"]},
 		{name: "mojeek", endpoint: viper.GetString("mojeek_endpoint"), enabled: enabledKeyless["mojeek"]},
 		{name: "yahoo", endpoint: viper.GetString("yahoo_endpoint"), enabled: enabledKeyless["yahoo"]},
@@ -239,7 +259,21 @@ func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
 		}
 		providers = append(providers, resilience.Wrap(p, resilienceCfg))
 	}
-	return search.NewService(providers, viper.GetFloat64("rate_rps"), viper.GetInt("rate_burst"), logger)
+	return search.NewServiceWithOptions(providers, search.ServiceOptions{
+		RequestsPerSecond: viper.GetFloat64("rate_rps"),
+		Burst:             viper.GetInt("rate_burst"),
+		ProviderTimeout:   viper.GetDuration("provider_timeout"),
+		Logger:            logger,
+	})
+}
+
+// withConfiguredTimeout applies a configured operation deadline while still
+// preserving the caller's earlier deadline when it is shorter.
+func withConfiguredTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 func renderResults(resp search.Response) string {

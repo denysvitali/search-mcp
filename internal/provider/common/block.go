@@ -22,6 +22,10 @@ var challengeMarkers = [][]byte{
 	// Generic phrasing used by Google/Bing/Yahoo style rate-limit pages.
 	[]byte("unusual traffic"),
 	[]byte("detected unusual"),
+	[]byte("/httpservice/retry/enablejs"),
+	[]byte("/sorry/"),
+	[]byte("verify you are human"),
+	[]byte("robot check"),
 	// Cloudflare and friends.
 	[]byte("cf-browser-verification"),
 	[]byte("just a moment..."),

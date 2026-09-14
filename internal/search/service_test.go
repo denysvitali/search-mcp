@@ -21,6 +21,22 @@ type stubProvider struct {
 	empty bool
 }
 
+type cancelOnLogHook struct{ cancel context.CancelFunc }
+
+func (h cancelOnLogHook) Levels() []logrus.Level { return logrus.AllLevels }
+func (h cancelOnLogHook) Fire(*logrus.Entry) error {
+	h.cancel()
+	return nil
+}
+
+type blockingProvider struct{ name string }
+
+func (p blockingProvider) Name() string { return p.name }
+func (p blockingProvider) Search(ctx context.Context, _ Request) (Response, error) {
+	<-ctx.Done()
+	return Response{}, ctx.Err()
+}
+
 func (s *stubProvider) Name() string {
 	return s.name
 }
@@ -351,6 +367,28 @@ func TestServiceNoFallbackOnContextCancellation(t *testing.T) {
 	}
 }
 
+func TestServiceCancellationAfterProviderFailureWinsOverJoinedErrors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logger := logrus.New()
+	logger.AddHook(cancelOnLogHook{cancel: cancel})
+	primary := &stubProvider{name: "alpha", err: errors.New("primary failed")}
+	secondary := &stubProvider{name: "beta"}
+	service, err := NewService([]Provider{primary, secondary}, 100, 1, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.Search(ctx, Request{Query: "test", Provider: "alpha"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if secondary.lastReq != nil {
+		t.Fatal("secondary should not be tried after cancellation")
+	}
+}
+
 func TestServiceAllProvidersFailReturnsSentinel(t *testing.T) {
 	primary := &stubProvider{name: "alpha", err: fmt.Errorf("a: %w", ErrRateLimited)}
 	secondary := &stubProvider{name: "beta", err: fmt.Errorf("b: %w", ErrBlocked)}
@@ -414,5 +452,32 @@ func TestServiceRespectsContextCancellation(t *testing.T) {
 	_, err = service.Search(ctx, Request{Query: "cancelled"})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestServiceProviderTimeoutFallsBack(t *testing.T) {
+	secondary := &stubProvider{name: "beta"}
+	service, err := NewServiceWithOptions([]Provider{
+		blockingProvider{name: "alpha"}, secondary,
+	}, ServiceOptions{
+		RequestsPerSecond: 100,
+		Burst:             1,
+		ProviderTimeout:   20 * time.Millisecond,
+		Logger:            logrus.New(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	resp, err := service.Search(context.Background(), Request{Query: "test", Provider: "alpha"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Provider != "beta" {
+		t.Fatalf("provider = %q, want beta", resp.Provider)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("fallback took %v, provider timeout was not enforced", elapsed)
 	}
 }

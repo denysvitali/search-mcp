@@ -43,7 +43,7 @@ func normalizeDomainList(domains []string) []string {
 // checkDomainPolicy reports whether the URL's host is fetchable under the
 // configured policy.
 func checkDomainPolicy(parsedURL *url.URL) error {
-	host := strings.ToLower(parsedURL.Hostname())
+	host := strings.TrimSuffix(strings.ToLower(parsedURL.Hostname()), ".")
 
 	readerDomainPolicy.mu.RLock()
 	defer readerDomainPolicy.mu.RUnlock()

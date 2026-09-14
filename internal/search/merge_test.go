@@ -105,13 +105,51 @@ func TestSearchAllRespectsCount(t *testing.T) {
 
 func TestNormalizeResultURL(t *testing.T) {
 	cases := map[string]string{
-		"https://Example.test/Page/":       "https://example.test/Page",
-		"http://example.test/Page":         "https://example.test/Page",
-		"https://example.test/Page#anchor": "https://example.test/Page",
+		"https://Example.test/Page/":                        "https://example.test/Page",
+		"https://www.example.test/Page?utm_source=x&keep=1": "https://example.test/Page?keep=1",
+		"http://example.test/Page":                          "https://example.test/Page",
+		"https://example.test/Page#anchor":                  "https://example.test/Page",
 	}
 	for in, want := range cases {
 		if got := normalizeResultURL(in); got != want {
 			t.Errorf("normalizeResultURL(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestSearchNormalizesQueryAndProvider(t *testing.T) {
+	provider := &fanoutStub{name: "bing", results: []Result{{Title: "hit", URL: "https://example.test"}}}
+	svc := newAllService(t, provider)
+
+	resp, err := svc.Search(context.Background(), Request{Query: "  useful query  ", Provider: " BING "})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if resp.Query != "useful query" || resp.Provider != "bing" {
+		t.Fatalf("response = %+v, want trimmed query and normalized provider", resp)
+	}
+	if provider.results[0].URL == "" {
+		t.Fatal("stub result unexpectedly changed")
+	}
+}
+
+func TestSearchRejectsWhitespaceQuery(t *testing.T) {
+	svc := newAllService(t, &fanoutStub{name: "bing"})
+	if _, err := svc.Search(context.Background(), Request{Query: " \t\n "}); err == nil {
+		t.Fatal("expected whitespace-only query to be rejected")
+	}
+}
+
+func TestFuseResultsDropsInvalidURLsAndRepairsMissingTitles(t *testing.T) {
+	results := fuseResults([]Response{{Results: []Result{
+		{URL: "/relative", Source: "test"},
+		{URL: "ftp://example.test/file", Source: "test"},
+		{URL: "https://example.test/valid", Source: "test"},
+	}}}, 0)
+	if len(results) != 1 {
+		t.Fatalf("results = %+v, want one valid URL", results)
+	}
+	if results[0].Title != results[0].URL {
+		t.Fatalf("title = %q, want URL fallback %q", results[0].Title, results[0].URL)
 	}
 }

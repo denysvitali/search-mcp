@@ -1,8 +1,11 @@
 package common
 
 import (
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/denysvitali/search-mcp/internal/search"
@@ -35,4 +38,24 @@ func ApplyExtraHeaders(req *http.Request, r search.Request) {
 	for k, v := range r.ExtraHeaders {
 		req.Header.Set(k, v)
 	}
+}
+
+// URLWithQuery joins query parameters onto a configured endpoint without
+// producing a second '?' when the endpoint already carries fixed options.
+// Values supplied by the request replace same-named endpoint values so caller
+// filters cannot be silently ignored.
+func URLWithQuery(endpoint string, values url.Values) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	if u.Host == "" || (strings.ToLower(u.Scheme) != "http" && strings.ToLower(u.Scheme) != "https") {
+		return "", fmt.Errorf("endpoint must be an absolute http(s) URL: %q", endpoint)
+	}
+	query := u.Query()
+	for key, value := range values {
+		query[key] = append([]string(nil), value...)
+	}
+	u.RawQuery = query.Encode()
+	return u.String(), nil
 }

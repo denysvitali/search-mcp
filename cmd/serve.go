@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -65,10 +68,22 @@ type batchSearchArgs struct {
 	Freshness  string   `json:"freshness,omitempty" jsonschema:"Provider freshness filter"`
 }
 
-// batchSearchResult groups the per-query responses; failed queries land in
-// Errors keyed by query instead of failing the whole batch.
+// batchSearchItem preserves one outcome for every input query, including
+// duplicates and blank queries. Keeping the input order makes batch results
+// straightforward to join back to the caller's work list.
+type batchSearchItem struct {
+	Query    string                 `json:"query"`
+	Response *searchdomain.Response `json:"response,omitempty"`
+	Error    string                 `json:"error,omitempty"`
+}
+
+// batchSearchResult groups one lossless outcome per input query.
 type batchSearchResult struct {
-	Responses []searchdomain.Response `json:"responses"`
+	Items []batchSearchItem `json:"items"`
+	// Responses and Errors retain the original shape for older clients. New
+	// clients should consume Items because the legacy map cannot represent
+	// duplicate query strings without data loss.
+	Responses []searchdomain.Response `json:"responses,omitempty"`
 	Errors    map[string]string       `json:"errors,omitempty"`
 }
 
@@ -110,16 +125,24 @@ func runBatchSearch(ctx context.Context, service *searchdomain.Service, queries 
 	}
 	wg.Wait()
 
-	result := batchSearchResult{}
-	for _, o := range outcomes {
+	result := batchSearchResult{Items: make([]batchSearchItem, len(outcomes))}
+	for i, o := range outcomes {
+		item := batchSearchItem{Query: o.query}
 		if o.err != nil {
+			item.Error = o.err.Error()
 			if result.Errors == nil {
 				result.Errors = make(map[string]string)
 			}
-			result.Errors[o.query] = o.err.Error()
+			if _, exists := result.Errors[o.query]; !exists {
+				result.Errors[o.query] = o.err.Error()
+			}
+			result.Items[i] = item
 			continue
 		}
-		result.Responses = append(result.Responses, o.resp)
+		resp := o.resp
+		item.Response = &resp
+		result.Responses = append(result.Responses, resp)
+		result.Items[i] = item
 	}
 	return result
 }
@@ -225,11 +248,12 @@ func readOnlyOpenWorld() *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}
 }
 
-// structuredResult suppresses the SDK's compatibility JSON text block. The
-// typed tool output is returned only through structuredContent, avoiding a
-// second copy of large search and reader payloads.
+// structuredResult leaves Content unset so the MCP SDK can add its standards-
+// compliant JSON text fallback alongside StructuredContent. Older clients can
+// therefore still consume tool output, while modern clients use the typed
+// structured payload.
 func structuredResult() *mcp.CallToolResult {
-	return &mcp.CallToolResult{Content: []mcp.Content{}}
+	return &mcp.CallToolResult{}
 }
 
 func newMCPServer(service *searchdomain.Service) *mcp.Server {
@@ -237,14 +261,16 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        toolSearch,
-		Description: "Search the web using a configured provider.",
+		Description: "Search the free web using configured HTML-scraping providers. Omit provider to fan out and merge rankings; partial provider failures are returned in degraded.",
 		Annotations: readOnlyOpenWorld(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchArgs) (*mcp.CallToolResult, searchdomain.Response, error) {
 		count, err := clampCount(intOrDefault(args.Count, viper.GetInt("count")))
 		if err != nil {
 			return nil, searchdomain.Response{}, err
 		}
-		resp, err := service.Search(ctx, searchdomain.Request{
+		searchCtx, cancel := withConfiguredTimeout(ctx, viper.GetDuration("search_timeout"))
+		defer cancel()
+		resp, err := service.Search(searchCtx, searchdomain.Request{
 			Query:      args.Query,
 			Provider:   valueOrDefault(args.Provider, viper.GetString("provider")),
 			Count:      count,
@@ -274,7 +300,9 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 		if err != nil {
 			return nil, batchSearchResult{}, err
 		}
-		result := runBatchSearch(ctx, service, args.Queries, searchdomain.Request{
+		batchCtx, cancel := withConfiguredTimeout(ctx, viper.GetDuration("batch_timeout"))
+		defer cancel()
+		result := runBatchSearch(batchCtx, service, args.Queries, searchdomain.Request{
 			Provider:   valueOrDefault(args.Provider, viper.GetString("provider")),
 			Count:      count,
 			Country:    valueOrDefault(args.Country, viper.GetString("country")),
@@ -287,11 +315,13 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        toolWebRead,
-		Description: "Fetch a URL and return its content as Markdown. GitHub repo / issue / pull-request URLs and Reddit comment threads are pulled from their JSON APIs; everything else is fetched as HTML and converted. Use max_length/start_index for chunked reads of long pages, or query to grep within the page.",
+		Description: "Fetch a public URL and return Markdown. Redirects are subject to the domain policy and SSRF guard. Use max_length/start_index for chunks, query for case-insensitive matches, or links to list links.",
 		Annotations: readOnlyOpenWorld(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args webReadArgs) (*mcp.CallToolResult, webReadResult, error) {
+		readCtx, cancel := withConfiguredTimeout(ctx, viper.GetDuration("read_timeout"))
+		defer cancel()
 		if args.Links != nil && *args.Links {
-			content, err := reader.ExtractLinks(ctx, args.URL)
+			content, err := reader.ExtractLinks(readCtx, args.URL)
 			if err != nil {
 				return nil, webReadResult{}, err
 			}
@@ -301,7 +331,7 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 		if args.Query != nil {
 			query = *args.Query
 		}
-		content, err := reader.ReadWithOptions(ctx, args.URL, reader.ReadOptions{
+		content, err := reader.ReadWithOptions(readCtx, args.URL, reader.ReadOptions{
 			MaxLength:    intOrDefault(args.MaxLength, 0),
 			StartIndex:   intOrDefault(args.StartIndex, 0),
 			Query:        query,
@@ -328,6 +358,8 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 		Description: "Read selected pages or search a PDF and return page-numbered text. Use pages for 1-based ranges such as 1-3,17, or query to find matching text. With neither, returns the PDF's metadata, page count, and outline so you can target pages. Results never include PDF bytes.",
 		Annotations: readOnlyOpenWorld(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args readPDFArgs) (*mcp.CallToolResult, readPDFResult, error) {
+		readCtx, cancel := withConfiguredTimeout(ctx, viper.GetDuration("read_timeout"))
+		defer cancel()
 		contextLines, err := clampPDFNumber(intOrDefault(args.Context, 2), maxPDFContextLines, "context")
 		if err != nil {
 			return nil, readPDFResult{}, err
@@ -336,7 +368,7 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 		if err != nil {
 			return nil, readPDFResult{}, err
 		}
-		content, err := reader.ReadPDF(ctx, args.URL, args.Pages, args.Query, contextLines, maxResults)
+		content, err := reader.ReadPDF(readCtx, args.URL, args.Pages, args.Query, contextLines, maxResults)
 		if err != nil {
 			return nil, readPDFResult{}, err
 		}
@@ -381,7 +413,7 @@ var serveCmd = &cobra.Command{
 		s := newMCPServer(service)
 
 		if addr := viper.GetString("http"); addr != "" {
-			return serveHTTP(ctx, s, addr)
+			return serveHTTP(ctx, s, addr, viper.GetString("http_token"))
 		}
 
 		// Run the stdio server with the signal-aware context so SIGINT/SIGTERM
@@ -398,14 +430,34 @@ func init() {
 	_ = viper.BindPFlag("http", serveCmd.Flags().Lookup("http"))
 }
 
+const maxHTTPBodyBytes = 1 << 20
+
 // serveHTTP exposes the MCP server over the streamable HTTP transport until
-// ctx is cancelled.
-func serveHTTP(ctx context.Context, s *mcp.Server, addr string) error {
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil)
+// ctx is cancelled. Non-loopback listeners require an explicit bearer token so
+// web_read cannot accidentally become an unauthenticated network pivot.
+func serveHTTP(ctx context.Context, s *mcp.Server, addr, token string) error {
+	if token == "" && httpAddressRequiresAuth(addr) {
+		return fmt.Errorf("refusing unauthenticated non-loopback HTTP listener %q; set --http-token", addr)
+	}
+
+	var handler http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil)
+	if token != "" {
+		handler = bearerTokenHandler(token, handler)
+	}
+	// Bound request bodies before the MCP decoder sees them. Search queries and
+	// URLs are tiny; accepting megabytes here only creates an avoidable memory
+	// and parsing DoS surface.
+	inner := handler
+	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxHTTPBodyBytes)
+		inner.ServeHTTP(w, r)
+	})
 	httpServer := &http.Server{
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	errCh := make(chan error, 1)
@@ -422,6 +474,42 @@ func serveHTTP(ctx context.Context, s *mcp.Server, addr string) error {
 		}
 		return nil
 	}
+}
+
+// bearerTokenHandler accepts a standard Authorization bearer token and a
+// purpose-specific header for clients that cannot conveniently set it. Token
+// comparisons use constant time to avoid making the listener an oracle.
+func bearerTokenHandler(token string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		provided := ""
+		if auth := strings.Fields(r.Header.Get("Authorization")); len(auth) == 2 && strings.EqualFold(auth[0], "Bearer") {
+			provided = auth[1]
+		}
+		if provided == "" {
+			provided = r.Header.Get("X-Search-MCP-Token")
+		}
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="search-mcp"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// httpAddressRequiresAuth reports whether addr can listen beyond loopback.
+// An empty host in ":8080" means all interfaces and therefore requires auth.
+func httpAddressRequiresAuth(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return true
+	}
+	host = strings.Trim(host, "[]")
+	if host == "localhost" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip == nil || !ip.IsLoopback()
 }
 
 func clampPDFNumber(value, maximum int, name string) (int, error) {

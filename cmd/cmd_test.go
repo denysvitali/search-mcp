@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,18 +108,22 @@ func TestRunBatchSearch(t *testing.T) {
 	}
 
 	result := runBatchSearch(context.Background(), svc, []string{"alpha", "will-fail", "beta"}, search.Request{Provider: "stub", Count: 5})
-	if len(result.Responses) != 2 {
-		t.Fatalf("responses = %d, want 2: %+v", len(result.Responses), result)
+	if len(result.Items) != 3 {
+		t.Fatalf("items = %d, want 3: %+v", len(result.Items), result)
 	}
-	if len(result.Errors) != 1 || result.Errors["will-fail"] == "" {
-		t.Errorf("errors = %+v, want one entry for will-fail", result.Errors)
+	if result.Items[1].Error == "" || result.Items[1].Response != nil {
+		t.Errorf("failed item = %+v, want error without response", result.Items[1])
 	}
-	got := map[string]bool{}
-	for _, resp := range result.Responses {
-		got[resp.Query] = true
+	if result.Items[0].Response == nil || result.Items[2].Response == nil {
+		t.Fatalf("successful items missing responses: %+v", result.Items)
 	}
-	if !got["alpha"] || !got["beta"] {
-		t.Errorf("missing responses: %+v", got)
+	if result.Items[0].Query != "alpha" || result.Items[1].Query != "will-fail" || result.Items[2].Query != "beta" {
+		t.Errorf("item order = %+v", result.Items)
+	}
+
+	duplicate := runBatchSearch(context.Background(), svc, []string{"same", "same"}, search.Request{Provider: "missing", Count: 1})
+	if len(duplicate.Items) != 2 || duplicate.Items[0].Error == "" || duplicate.Items[1].Error == "" {
+		t.Fatalf("duplicate failures = %+v, want one error per input", duplicate.Items)
 	}
 }
 
@@ -128,7 +134,7 @@ func TestCollectProviderStatus(t *testing.T) {
 	}
 	result := collectProviderStatus(svc)
 	if len(result.Providers) < 2 {
-		t.Fatalf("providers = %d, want at least duckduckgo and mojeek", len(result.Providers))
+		t.Fatalf("providers = %d, want at least duckduckgo and bing", len(result.Providers))
 	}
 	for _, p := range result.Providers {
 		if p.Breaker != "closed" {
@@ -137,6 +143,58 @@ func TestCollectProviderStatus(t *testing.T) {
 		if p.RateLimitTokens <= 0 {
 			t.Errorf("provider %s tokens = %v, want > 0", p.Name, p.RateLimitTokens)
 		}
+	}
+}
+
+func TestBearerTokenHandler(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := bearerTokenHandler("secret", next)
+
+	for _, tc := range []struct {
+		name   string
+		header string
+		value  string
+		status int
+	}{
+		{name: "missing", status: http.StatusUnauthorized},
+		{name: "wrong", header: "Authorization", value: "Bearer nope", status: http.StatusUnauthorized},
+		{name: "bearer", header: "Authorization", value: "Bearer secret", status: http.StatusNoContent},
+		{name: "case insensitive bearer", header: "Authorization", value: "bearer secret", status: http.StatusNoContent},
+		{name: "compatibility header", header: "X-Search-MCP-Token", value: "secret", status: http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://localhost/mcp", nil)
+			if tc.header != "" {
+				req.Header.Set(tc.header, tc.value)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, req)
+			if recorder.Code != tc.status {
+				t.Fatalf("status = %d, want %d", recorder.Code, tc.status)
+			}
+		})
+	}
+}
+
+func TestHTTPAddressRequiresAuth(t *testing.T) {
+	for _, tc := range []struct {
+		addr string
+		want bool
+	}{
+		{addr: "127.0.0.1:8080", want: false},
+		{addr: "[::1]:8080", want: false},
+		{addr: "localhost:8080", want: false},
+		{addr: ":8080", want: true},
+		{addr: "0.0.0.0:8080", want: true},
+		{addr: "example.test:8080", want: true},
+	} {
+		t.Run(tc.addr, func(t *testing.T) {
+			if got := httpAddressRequiresAuth(tc.addr); got != tc.want {
+				t.Fatalf("httpAddressRequiresAuth(%q) = %v, want %v", tc.addr, got, tc.want)
+			}
+		})
 	}
 }
 

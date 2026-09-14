@@ -4,17 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/denysvitali/search-mcp/internal/observability"
 	"github.com/denysvitali/search-mcp/internal/reader"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
-
-// readTimeout bounds a single web_read fetch so a slow or hanging server
-// cannot block the command forever.
-const readTimeout = 30 * time.Second
 
 var readCmd = &cobra.Command{
 	Use:   "read URL",
@@ -34,7 +29,7 @@ var readCmd = &cobra.Command{
 		}
 		defer func() { _ = shutdown(context.Background()) }()
 
-		readCtx, cancel := context.WithTimeout(ctx, readTimeout)
+		readCtx, cancel := withConfiguredTimeout(ctx, viper.GetDuration("read_timeout"))
 		defer cancel()
 
 		content, err := reader.Read(readCtx, args[0])

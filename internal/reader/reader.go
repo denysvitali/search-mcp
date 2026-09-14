@@ -120,8 +120,12 @@ func validateURL(urlStr string) (*url.URL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid URL: %w", err)
 	}
+	parsedURL.Scheme = strings.ToLower(parsedURL.Scheme)
 	if !slices.Contains(supportedSchemes, parsedURL.Scheme) {
 		return nil, fmt.Errorf("unsupported URL scheme: %s (only http and https are supported)", parsedURL.Scheme)
+	}
+	if parsedURL.Hostname() == "" {
+		return nil, fmt.Errorf("invalid URL: host is required")
 	}
 	if err := checkDomainPolicy(parsedURL); err != nil {
 		return nil, err
@@ -132,7 +136,11 @@ func validateURL(urlStr string) (*url.URL, error) {
 func newHTTPClient() *http.Client {
 	dialer := &net.Dialer{Timeout: defaultHTTPTimeout, Control: guardDialAddress}
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		// Do not honor ambient HTTP(S)_PROXY here: the dial guard protects the
+		// address actually dialed, and a proxy could otherwise fetch a private
+		// redirect target on our behalf while the client only connects to the
+		// proxy's public address.
+		Proxy:                 nil,
 		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
@@ -145,6 +153,15 @@ func newHTTPClient() *http.Client {
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= maxHTTPRedirectCount {
 			return fmt.Errorf("too many redirects")
+		}
+		if req.URL == nil || !slices.Contains(supportedSchemes, strings.ToLower(req.URL.Scheme)) {
+			return fmt.Errorf("redirected to unsupported URL scheme")
+		}
+		// validateURL checks the initial destination, but redirects are new
+		// caller-controlled destinations too. Reapply the domain policy here so
+		// an allowed page cannot bounce the reader onto a blocked host.
+		if err := checkDomainPolicy(req.URL); err != nil {
+			return fmt.Errorf("redirect destination rejected: %w", err)
 		}
 		return nil
 	}

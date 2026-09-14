@@ -95,10 +95,11 @@ func (y *Yahoo) Search(ctx context.Context, req search.Request) (search.Response
 			break
 		}
 		for _, r := range pageResults {
-			if _, dup := seen[r.URL]; dup {
+			key := search.NormalizeResultURL(r.URL)
+			if _, dup := seen[key]; dup {
 				continue
 			}
-			seen[r.URL] = struct{}{}
+			seen[key] = struct{}{}
 			results = append(results, r)
 			if len(results) >= count {
 				break
