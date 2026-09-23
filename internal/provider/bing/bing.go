@@ -158,7 +158,56 @@ func (b *Bing) searchPage(ctx context.Context, req search.Request, page int) ([]
 	if !found {
 		return nil, common.ErrMissingResultsContainer("bing", "#b_results")
 	}
+	// Bing has been observed serving a normal-looking organic results container
+	// filled with unrelated pages to automated clients. Do not let those pages
+	// acquire a healthy provider vote in the merged ranking.
+	if len(results) > 0 && !bingResultsRelevant(req.Query, results) {
+		return nil, fmt.Errorf("bing returned results unrelated to the query: %w", provider.ErrBlocked)
+	}
 	return results, nil
+}
+
+func bingResultsRelevant(query string, results []search.Result) bool {
+	var terms []string
+	var site string
+	for _, word := range strings.Fields(strings.ToLower(query)) {
+		if strings.HasPrefix(word, "site:") {
+			site = strings.Trim(strings.TrimPrefix(word, "site:"), "/")
+			continue
+		}
+		word = strings.Trim(word, `"'()+-.,?!`)
+		if len(word) >= 4 {
+			terms = append(terms, word)
+		}
+	}
+	for _, result := range results {
+		if site != "" {
+			u, err := url.Parse(result.URL)
+			if err != nil || !bingMatchesSite(u, site) {
+				continue
+			}
+		}
+		if len(terms) == 0 {
+			return true
+		}
+		content := strings.ToLower(result.Title + " " + result.Description + " " + result.URL)
+		for _, term := range terms {
+			if strings.Contains(content, term) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func bingMatchesSite(u *url.URL, site string) bool {
+	parts := strings.SplitN(site, "/", 2)
+	host := strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
+	want := strings.TrimPrefix(parts[0], "www.")
+	if host != want && !strings.HasSuffix(host, "."+want) {
+		return false
+	}
+	return len(parts) == 1 || strings.HasPrefix(strings.TrimPrefix(u.Path, "/"), parts[1])
 }
 
 func bingSafeSearch(value string) string {

@@ -3,7 +3,7 @@
 Go MCP server and CLI for web search.
 
 Provider implementations live in dedicated packages under `internal/provider/`
-(`duckduckgo`, `bing`, `google`, `marginalia`, `mojeek`, `yahoo`, `brave`,
+(`duckduckgo`, `bing`, `google`, `marginalia`, `mojeek`, `wikipedia`, `yahoo`, `brave`,
 `searxng`, `kagi`, `exa`, and `tavily`). Each package implements `search.Provider` and registers
 its constructor from `init()`; the command imports the packages for
 registration and builds only the providers enabled by configuration.
@@ -12,17 +12,18 @@ registration and builds only the providers enabled by configuration.
 
 ### Free/keyless providers
 
-By default `duckduckgo`, `bing`, and `yahoo` are enabled. This default set uses
+By default `duckduckgo` and `yahoo` are enabled. This default set uses
 browser-facing HTML pages only: no API key, subscription, or paid search API is
 required. Change the set with `--providers` (or `SEARCH_MCP_PROVIDERS`), e.g.
-`--providers duckduckgo,bing,yahoo`.
+`--providers duckduckgo,yahoo`.
 
 - `duckduckgo`: scrapes `https://html.duckduckgo.com/html/` (the same endpoint the DuckDuckGo web UI uses). DDG aggressively rate-limits datacenter IPs and serves an anomaly/captcha page after a few requests; the provider detects this and reports it as blocked so the search falls back. Its HTML endpoint returns about ten results per page and its next-page cursor is bot-gated, so it does not paginate.
-- `bing`: scrapes Bing's browser-facing HTML results page, unwraps Bing click redirects, maps country/language/safe-search/freshness filters, and pages up to three pages. It is usually the strongest free fallback, but public SERPs can still change markup or return a challenge.
+- `bing`: scrapes Bing's browser-facing HTML results page, unwraps Bing click redirects, maps country/language/safe-search/freshness filters, and pages up to three pages. It is opt-in because live CLI probes found empty or unrelated organic results on ordinary queries. The provider rejects obviously unrelated results as a block instead of merging them into the answer.
 - `google`: scrapes Google's browser-facing HTML results page, including `/url` click redirects and common snippets. It is **opt-in** because Google challenges hosted/datacenter IPs more aggressively: enable it with `--providers duckduckgo,bing,google,yahoo` when it works well from your network.
 - `yahoo`: scrapes Yahoo's public HTML results. Tracking links are unwrapped to their destination URLs, snippet date prefixes are lifted into `published`, and it pages via the `b` offset (up to three pages) to satisfy larger `count` values.
 - `marginalia`: uses the public keyless JSON endpoint `https://api.marginalia.nu/public/search` as an optional independent fallback. It favours small, text-heavy, non-SEO-optimised sites and returns twenty results in one call. It is not in the default set because the default path is intentionally HTML-only.
-- `mojeek`: scrapes `https://www.mojeek.com/search`. **Not enabled by default** — Mojeek currently answers datacenter IPs with an HTTP 200 captcha page regardless of User-Agent, so it costs a round trip while returning nothing. Re-enable it with `--providers duckduckgo,bing,yahoo,mojeek` if your IP is served normally.
+- `wikipedia`: uses Wikipedia's public MediaWiki search API, with no key. It is useful for encyclopedic topics and supports `language` by searching that language's Wikipedia. Enable it with `--providers duckduckgo,yahoo,wikipedia`. It is opt-in because its encyclopedia index is a poor fit for general web and recent-news queries.
+- `mojeek`: scrapes `https://www.mojeek.com/search`. **Not enabled by default** — Mojeek currently answers datacenter IPs with an HTTP 200 captcha page regardless of User-Agent, so it costs a round trip while returning nothing. Re-enable it with `--providers duckduckgo,yahoo,mojeek` if your IP is served normally.
 
 ### Keyed (enabled when configured)
 
@@ -32,7 +33,7 @@ required. Change the set with `--providers` (or `SEARCH_MCP_PROVIDERS`), e.g.
 - `exa`: uses Exa Search API. Set `SEARCH_MCP_EXA_API_KEY` or `--exa-api-key`.
 - `tavily`: uses Tavily Search API. Set `SEARCH_MCP_TAVILY_API_KEY` or `--tavily-api-key`.
 
-The free providers are scrapers fighting anti-bot systems, so treat them as
+The HTML providers are scrapers fighting anti-bot systems, so treat them as
 best effort: expect roughly ten results per page and occasional blocks. The
 service fans out by default, detects soft challenge pages, skips failed
 providers, and reports them in `degraded`. The API-backed providers below are
@@ -44,7 +45,7 @@ free path never calls them.
 ```sh
 go run . search "model context protocol"                        # fans out to every provider
 go run . search "model context protocol" --provider duckduckgo  # one provider, with fallback
-go run . search "open telemetry go" --providers duckduckgo,bing,google,yahoo --count 5
+go run . search "open telemetry go" --providers duckduckgo,yahoo,wikipedia --count 5
 go run . read https://github.com/golang/go/issues/64876
 go run . serve
 ```
@@ -57,8 +58,10 @@ Useful settings:
 provider: ""            # "" or "all" fans out; a name selects one provider
 providers:              # keyless providers to enable
   - duckduckgo
-  - bing
   - yahoo
+  # Add bing or wikipedia for your use case:
+  # - bing
+  # - wikipedia
   # Add google when it is reachable from your network:
   # - google
 brave_api_key: ""
@@ -72,6 +75,7 @@ bing_endpoint: ""
 google_endpoint: ""
 marginalia_endpoint: ""
 mojeek_endpoint: ""
+wikipedia_endpoint: ""
 yahoo_endpoint: ""
 rate_rps: 1
 rate_burst: 2

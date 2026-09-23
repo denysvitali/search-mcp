@@ -65,6 +65,14 @@ func TestNewSearchServiceDefaults(t *testing.T) {
 	}
 }
 
+func TestUnknownKeylessProvider(t *testing.T) {
+	t.Setenv("SEARCH_MCP_PROVIDERS", "duckduckgo,wikipeda")
+	_, err := newSearchService(logrus.New())
+	if err == nil || !strings.Contains(err.Error(), `unknown keyless provider "wikipeda"`) {
+		t.Fatalf("error = %v, want unknown provider with its name", err)
+	}
+}
+
 func TestRenderResults(t *testing.T) {
 	out := renderResults(search.Response{
 		Provider: "duckduckgo",
@@ -84,6 +92,13 @@ func TestRenderResultsEmpty(t *testing.T) {
 	out := renderResults(search.Response{Provider: "mojeek", Query: "x"})
 	if !strings.Contains(out, "No results.") {
 		t.Errorf("expected empty-results message, got %q", out)
+	}
+}
+
+func TestRenderResultsReportsDegradedProviders(t *testing.T) {
+	out := renderResults(search.Response{Provider: "all", Query: "go", Degraded: []search.ProviderFailure{{Provider: "bing", Error: "blocked"}}})
+	if !strings.Contains(out, "bing: blocked") {
+		t.Fatalf("missing provider failure in CLI output: %q", out)
 	}
 }
 

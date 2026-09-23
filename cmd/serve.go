@@ -261,7 +261,7 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        toolSearch,
-		Description: "Search the free web using configured HTML-scraping providers. Omit provider to fan out and merge rankings; partial provider failures are returned in degraded.",
+		Description: "Search the web using configured providers. Omit provider to fan out and merge rankings; partial provider failures are returned in degraded.",
 		Annotations: readOnlyOpenWorld(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchArgs) (*mcp.CallToolResult, searchdomain.Response, error) {
 		count, err := clampCount(intOrDefault(args.Count, viper.GetInt("count")))

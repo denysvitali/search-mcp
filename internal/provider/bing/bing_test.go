@@ -95,3 +95,25 @@ func TestBingPagesAndDeduplicates(t *testing.T) {
 		t.Fatalf("results = %d, want 12", len(resp.Results))
 	}
 }
+
+func TestBingRejectsUnrelatedResults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<ol id="b_results"><li class="b_algo"><h2><a href="https://maps.example/city">City maps</a></h2><div class="b_caption">Find directions nearby</div></li></ol>`))
+	}))
+	defer server.Close()
+	_, err := NewBing(server.URL).Search(context.Background(), search.Request{Query: "golang context cancellation"})
+	if !errors.Is(err, provider.ErrBlocked) {
+		t.Fatalf("error = %v, want ErrBlocked", err)
+	}
+}
+
+func TestBingSiteRestriction(t *testing.T) {
+	results := []search.Result{{Title: "Context in Go", URL: "https://go.dev/blog/context"}}
+	if !bingResultsRelevant("site:go.dev/blog context", results) {
+		t.Fatal("matching site and query was rejected")
+	}
+	results[0].URL = "https://other.example/blog/context"
+	if bingResultsRelevant("site:go.dev/blog context", results) {
+		t.Fatal("off-site result was accepted")
+	}
+}

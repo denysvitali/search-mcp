@@ -20,6 +20,7 @@ import (
 	_ "github.com/denysvitali/search-mcp/internal/provider/mojeek"
 	_ "github.com/denysvitali/search-mcp/internal/provider/searxng"
 	_ "github.com/denysvitali/search-mcp/internal/provider/tavily"
+	_ "github.com/denysvitali/search-mcp/internal/provider/wikipedia"
 	_ "github.com/denysvitali/search-mcp/internal/provider/yahoo"
 	"github.com/denysvitali/search-mcp/internal/reader"
 	"github.com/denysvitali/search-mcp/internal/resilience"
@@ -77,6 +78,7 @@ func init() {
 	rootCmd.PersistentFlags().String("google-endpoint", "", "Google HTML search endpoint")
 	rootCmd.PersistentFlags().String("marginalia-endpoint", "", "Marginalia public search API endpoint")
 	rootCmd.PersistentFlags().String("mojeek-endpoint", "", "Mojeek search HTML endpoint")
+	rootCmd.PersistentFlags().String("wikipedia-endpoint", "", "Wikipedia MediaWiki API endpoint")
 	rootCmd.PersistentFlags().String("yahoo-endpoint", "", "Yahoo search HTML endpoint")
 	rootCmd.PersistentFlags().String("searxng-url", "", "SearXNG instance URL (enables the searxng provider)")
 	rootCmd.PersistentFlags().Float64("rate-rps", 1, "requests per second per provider")
@@ -117,6 +119,7 @@ func init() {
 	_ = viper.BindPFlag("google_endpoint", rootCmd.PersistentFlags().Lookup("google-endpoint"))
 	_ = viper.BindPFlag("marginalia_endpoint", rootCmd.PersistentFlags().Lookup("marginalia-endpoint"))
 	_ = viper.BindPFlag("mojeek_endpoint", rootCmd.PersistentFlags().Lookup("mojeek-endpoint"))
+	_ = viper.BindPFlag("wikipedia_endpoint", rootCmd.PersistentFlags().Lookup("wikipedia-endpoint"))
 	_ = viper.BindPFlag("yahoo_endpoint", rootCmd.PersistentFlags().Lookup("yahoo-endpoint"))
 	_ = viper.BindPFlag("searxng_url", rootCmd.PersistentFlags().Lookup("searxng-url"))
 	_ = viper.BindPFlag("rate_rps", rootCmd.PersistentFlags().Lookup("rate-rps"))
@@ -195,31 +198,37 @@ func newLogger() logrus.FieldLogger {
 // defaultKeylessProviders is the no-API-key provider set enabled out of the box.
 //
 // Google is opt-in: it answers many datacenter IPs with a JavaScript challenge.
+// Bing is opt-in: live CLI probes found empty or unrelated organic results for
+// ordinary queries, which are worse than an explicit provider failure.
 // Mojeek is deliberately absent: it answers a datacenter IP with an HTTP 200
 // captcha page regardless of User-Agent, so leaving it on costs a wasted round
 // trip on every search while contributing nothing. It stays available via
 // --providers for anyone searching from an IP it does serve.
-var defaultKeylessProviders = []string{"duckduckgo", "bing", "yahoo"}
+var defaultKeylessProviders = []string{"duckduckgo", "yahoo"}
 
 // keylessProviderSet resolves the --providers list into a lookup set.
 //
 // Entries are split on commas as well as on slice boundaries: viper hands a
 // SEARCH_MCP_PROVIDERS env var through as a single string, so "a,b" would
 // otherwise arrive as one unmatchable name.
-func keylessProviderSet() map[string]bool {
+func keylessProviderSet() (map[string]bool, error) {
 	names := viper.GetStringSlice("providers")
 	if len(names) == 0 {
 		names = defaultKeylessProviders
 	}
 	set := make(map[string]bool, len(names))
+	valid := map[string]bool{"duckduckgo": true, "bing": true, "google": true, "marginalia": true, "mojeek": true, "wikipedia": true, "yahoo": true}
 	for _, entry := range names {
 		for name := range strings.SplitSeq(entry, ",") {
 			if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
+				if !valid[name] {
+					return nil, fmt.Errorf("unknown keyless provider %q; choose from bing, duckduckgo, google, marginalia, mojeek, wikipedia, yahoo", name)
+				}
 				set[name] = true
 			}
 		}
 	}
-	return set
+	return set, nil
 }
 
 func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
@@ -231,7 +240,10 @@ func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
 		CacheTTL:         viper.GetDuration("cache_ttl"),
 	}
 
-	enabledKeyless := keylessProviderSet()
+	enabledKeyless, err := keylessProviderSet()
+	if err != nil {
+		return nil, err
+	}
 	configured := []struct {
 		name, key, endpoint string
 		enabled             bool
@@ -241,6 +253,7 @@ func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
 		{name: "google", endpoint: viper.GetString("google_endpoint"), enabled: enabledKeyless["google"]},
 		{name: "marginalia", endpoint: viper.GetString("marginalia_endpoint"), enabled: enabledKeyless["marginalia"]},
 		{name: "mojeek", endpoint: viper.GetString("mojeek_endpoint"), enabled: enabledKeyless["mojeek"]},
+		{name: "wikipedia", endpoint: viper.GetString("wikipedia_endpoint"), enabled: enabledKeyless["wikipedia"]},
 		{name: "yahoo", endpoint: viper.GetString("yahoo_endpoint"), enabled: enabledKeyless["yahoo"]},
 		{name: "brave", key: viper.GetString("brave_api_key"), endpoint: viper.GetString("brave_endpoint"), enabled: viper.GetString("brave_api_key") != ""},
 		{name: "searxng", endpoint: viper.GetString("searxng_url"), enabled: viper.GetString("searxng_url") != ""},
@@ -294,6 +307,12 @@ func renderResults(resp search.Response) string {
 	}
 	if len(resp.Results) == 0 {
 		fmt.Fprintf(&b, "%s\n", mutedStyle.Render("No results."))
+	}
+	if len(resp.Degraded) > 0 {
+		fmt.Fprintf(&b, "\n%s\n", mutedStyle.Render("Unavailable providers:"))
+		for _, failure := range resp.Degraded {
+			fmt.Fprintf(&b, "- %s: %s\n", failure.Provider, failure.Error)
+		}
 	}
 	return b.String()
 }
