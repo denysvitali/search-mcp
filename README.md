@@ -1,11 +1,28 @@
 # search-mcp
 
-Go MCP server and CLI for web search.
+Go MCP server and CLI for **general web search**: travel, products, household
+questions, news, technical topics, and any other ordinary web query.
+
+```sh
+search-mcp search "best time to visit Kyoto in autumn"
+search-mcp search "how to remove coffee stains from cotton" --count 5
+search-mcp serve
+```
+
+These commands search the web through **DuckDuckGo + Yahoo**, with no signup,
+API key, or payment. Their HTML results are merged, and if one engine blocks
+the request, results from the other are still returned. Scrapers are best effort.
+Hacker News, Stack Overflow, Crossref, and Wikipedia are optional specialist
+indexes; they are **not enabled by default**.
+
+For a general-web API instead of scraping, you can add a **free Serper or
+Tavily key**. Serper supplies Google organic results; Tavily supports general
+web searches with a recurring free allowance. See the setup below.
 
 Provider implementations live in dedicated packages under `internal/provider/`
 (`duckduckgo`, `bing`, `google`, `marginalia`, `mojeek`, `wikipedia`, `yahoo`,
 `hackernews`, `stackexchange`, `crossref`, `brave`, `searxng`, `kagi`, `exa`,
-and `tavily`). Each package implements `search.Provider` and registers
+`serper`, and `tavily`). Each package implements `search.Provider` and registers
 its constructor from `init()`; the command imports the packages for
 registration and builds only the providers enabled by configuration.
 
@@ -25,6 +42,38 @@ required. Change the set with `--providers` (or `SEARCH_MCP_PROVIDERS`), e.g.
 - `marginalia`: uses the public keyless JSON endpoint `https://api.marginalia.nu/public/search` as an optional independent fallback. It favours small, text-heavy, non-SEO-optimised sites and returns twenty results in one call. It is not in the default set because the default path is intentionally HTML-only.
 - `wikipedia`: uses Wikipedia's public MediaWiki search API, with no key. It is useful for encyclopedic topics and supports `language` by searching that language's Wikipedia. Enable it with `--providers duckduckgo,yahoo,wikipedia`. It is opt-in because its encyclopedia index is a poor fit for general web and recent-news queries.
 - `mojeek`: scrapes `https://www.mojeek.com/search`. **Not enabled by default** — Mojeek currently answers datacenter IPs with an HTTP 200 captcha page regardless of User-Agent, so it costs a round trip while returning nothing. Re-enable it with `--providers duckduckgo,yahoo,mojeek` if your IP is served normally.
+
+### General web with a free API key
+
+- **Serper (`serper`)** returns Google's organic web results as structured JSON. [Create a free account without a credit card](https://serper.dev/signup), then set `SEARCH_MCP_SERPER_API_KEY`. Free signup credits are finite; consult your dashboard for the current allowance. The provider makes one search request, without automatically paging or buying credits. Country (`gl`), language (`hl`), and day/week/month/year freshness are supported. Safe-search is not mapped by this integration.
+- **Tavily (`tavily`)** offers [1,000 free credits monthly with no credit card required](https://docs.tavily.com/documentation/api-credits). Set `SEARCH_MCP_TAVILY_API_KEY`. This integration uses `topic=general`, `search_depth=basic` (one credit), and `auto_parameters=false`; it does not request generated answers or raw-page extraction. It supports relative freshness, language, and safe-search, and caps results at 20 to match the API limit.
+
+```sh
+# Set either key in your shell/config; no subscription is required to start.
+export SEARCH_MCP_SERPER_API_KEY='your-free-key'
+search-mcp search "quiet dishwasher reviews" --provider serper
+# Or use the recurring free allowance:
+export SEARCH_MCP_TAVILY_API_KEY='your-free-key'
+search-mcp search "James Webb telescope discoveries" --provider tavily
+```
+
+Configured API providers join default fan-out, so they consume their search
+allowance on each uncached query. Use `--provider serper` or `--provider tavily`
+to try that API first; ordinary provider fallback still applies.
+
+### Existing optional API integrations (enabled only when configured)
+
+- `brave`: uses Brave Search API. Set `SEARCH_MCP_BRAVE_API_KEY` or `--brave-api-key`. `count` is clamped to Brave's maximum of 20; larger requests page via `offset`.
+- `searxng`: uses a SearXNG instance's JSON API. Set `SEARCH_MCP_SEARXNG_URL` or `--searxng-url`. The instance must have `format=json` enabled.
+- `kagi`: uses Kagi Search API. Set `SEARCH_MCP_KAGI_API_KEY` or `--kagi-api-key`.
+- `exa`: uses Exa Search API. Set `SEARCH_MCP_EXA_API_KEY` or `--exa-api-key`.
+
+The HTML providers are scrapers fighting anti-bot systems, so treat them as
+best effort: expect roughly ten results per page and occasional blocks. The
+service fans out by default, detects soft challenge pages, skips failed
+providers, and reports them in `degraded`. The existing keyed providers are
+optional compatibility integrations; with no API keys configured, the default
+free path never calls them.
 
 ### Free specialist APIs (no signup or key)
 
@@ -50,27 +99,12 @@ search-mcp search "Vaswani attention transformer" --providers crossref
 search-mcp serve --providers duckduckgo,yahoo,hackernews,stackexchange
 ```
 
-### Existing optional API integrations (enabled only when configured)
-
-- `brave`: uses Brave Search API. Set `SEARCH_MCP_BRAVE_API_KEY` or `--brave-api-key`. `count` is clamped to Brave's maximum of 20; larger requests page via `offset`.
-- `searxng`: uses a SearXNG instance's JSON API. Set `SEARCH_MCP_SEARXNG_URL` or `--searxng-url`. The instance must have `format=json` enabled.
-- `kagi`: uses Kagi Search API. Set `SEARCH_MCP_KAGI_API_KEY` or `--kagi-api-key`.
-- `exa`: uses Exa Search API. Set `SEARCH_MCP_EXA_API_KEY` or `--exa-api-key`.
-- `tavily`: uses Tavily Search API. Set `SEARCH_MCP_TAVILY_API_KEY` or `--tavily-api-key`.
-
-The HTML providers are scrapers fighting anti-bot systems, so treat them as
-best effort: expect roughly ten results per page and occasional blocks. The
-service fans out by default, detects soft challenge pages, skips failed
-providers, and reports them in `degraded`. The existing keyed providers are
-optional compatibility integrations; with no API keys configured, the default
-free path never calls them.
-
 ## Usage
 
 ```sh
-go run . search "model context protocol"                        # fans out to every provider
+go run . search "best time to visit Kyoto in autumn"            # general web, free by default
 go run . search "model context protocol" --provider duckduckgo  # one provider, with fallback
-go run . search "open telemetry go" --providers duckduckgo,yahoo,wikipedia --count 5
+go run . search "coffee stain removal cotton" --count 5
 go run . search "Go concurrency" --include-domains go.dev,pkg.go.dev --count 5
 go run . search "distributed tracing" --exclude-domains pinterest.com --max-per-host 2
 go run . read https://github.com/golang/go/issues/64876
@@ -101,6 +135,8 @@ searxng_url: ""
 kagi_api_key: ""
 exa_api_key: ""
 tavily_api_key: ""
+serper_api_key: ""
+serper_endpoint: ""
 include_domains: []     # search result filter, includes subdomains
 exclude_domains: []     # search result filter, exclusions win
 max_per_host: 0         # set to 2 for source diversity; 0 disables

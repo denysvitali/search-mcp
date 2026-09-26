@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -74,5 +75,24 @@ func TestLLMNativeProvidersRejectEmptyKey(t *testing.T) {
 		if newProvider(" ") == nil {
 			t.Error("expected empty key error")
 		}
+	}
+}
+
+func TestTavilyGeneralSearchWithinFreeCreditCost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		if body["max_results"] != float64(20) || body["topic"] != "general" || body["search_depth"] != "basic" || body["auto_parameters"] != false || body["include_answer"] != false || body["include_raw_content"] != false || body["time_range"] != "week" || body["language"] != "en" || body["safe_search"] != true {
+			t.Errorf("bad general search payload %+v", body)
+		}
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	defer server.Close()
+	_, err := NewTavily("free-key", server.URL).Search(context.Background(), search.Request{Query: "Kyoto autumn", Count: 50, Freshness: "pw", Language: "EN", SafeSearch: "strict"})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

@@ -183,9 +183,42 @@ func (p *Tavily) Search(ctx context.Context, req search.Request) (search.Respons
 	if p.keyErr != nil {
 		return search.Response{}, p.keyErr
 	}
-	payload := map[string]any{"query": req.Query, "max_results": req.Count, "search_depth": "basic"}
+	count := req.Count
+	if count <= 0 {
+		count = 10
+	}
+	// Basic general search uses one credit. Do not let auto-parameters
+	// silently select advanced search or add content/answer generation.
+	payload := map[string]any{
+		"query": req.Query, "max_results": min(count, 20), "topic": "general",
+		"search_depth": "basic", "auto_parameters": false,
+		"include_answer": false, "include_raw_content": false,
+		"include_published_date": true,
+	}
 	if req.Freshness != "" {
-		payload["time_range"] = req.Freshness
+		switch strings.ToLower(strings.TrimSpace(req.Freshness)) {
+		case "pd", "day", "d":
+			payload["time_range"] = "day"
+		case "pw", "week", "w":
+			payload["time_range"] = "week"
+		case "pm", "month", "m":
+			payload["time_range"] = "month"
+		case "py", "year", "y":
+			payload["time_range"] = "year"
+		default:
+			return search.Response{}, fmt.Errorf("tavily: unsupported freshness %q", req.Freshness)
+		}
+	}
+	if req.Language != "" {
+		payload["language"] = strings.ToLower(strings.TrimSpace(req.Language))
+	}
+	if req.SafeSearch != "" {
+		switch strings.ToLower(strings.TrimSpace(req.SafeSearch)) {
+		case "off", "none", "0":
+			payload["safe_search"] = false
+		case "strict", "moderate", "on", "1", "2":
+			payload["safe_search"] = true
+		}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -217,6 +250,9 @@ func (p *Tavily) Search(ctx context.Context, req search.Request) (search.Respons
 	}
 	if err := json.NewDecoder(common.LimitedBody(resp.Body)).Decode(&out); err != nil {
 		return search.Response{}, err
+	}
+	if out.Results == nil {
+		return search.Response{}, fmt.Errorf("tavily response missing results array")
 	}
 	results := make([]search.Result, 0, len(out.Results))
 	for _, r := range out.Results {

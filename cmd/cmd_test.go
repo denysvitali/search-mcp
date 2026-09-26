@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -273,5 +274,19 @@ func TestFreeSpecialistProvidersConfiguredWithoutKeys(t *testing.T) {
 		if service.Provider(name) == nil {
 			t.Fatalf("keyless provider %s was not enabled", name)
 		}
+	}
+}
+
+func TestDefaultProvidersAreGeneralWeb(t *testing.T) {
+	t.Setenv("SEARCH_MCP_PROVIDERS", "")
+	for _, key := range []string{"BRAVE_API_KEY", "KAGI_API_KEY", "EXA_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY", "SEARXNG_URL"} {
+		t.Setenv("SEARCH_MCP_"+key, "")
+	}
+	svc, err := newSearchService(logrus.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.ProviderNames(); !reflect.DeepEqual(got, []string{"duckduckgo", "yahoo"}) {
+		t.Fatalf("default general web providers: %v", got)
 	}
 }

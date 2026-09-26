@@ -21,6 +21,7 @@ import (
 	_ "github.com/denysvitali/search-mcp/internal/provider/marginalia"
 	_ "github.com/denysvitali/search-mcp/internal/provider/mojeek"
 	_ "github.com/denysvitali/search-mcp/internal/provider/searxng"
+	_ "github.com/denysvitali/search-mcp/internal/provider/serper"
 	_ "github.com/denysvitali/search-mcp/internal/provider/stackexchange"
 	_ "github.com/denysvitali/search-mcp/internal/provider/tavily"
 	_ "github.com/denysvitali/search-mcp/internal/provider/wikipedia"
@@ -74,7 +75,9 @@ func init() {
 	rootCmd.PersistentFlags().String("kagi-endpoint", "", "Kagi Search API endpoint")
 	rootCmd.PersistentFlags().String("exa-api-key", "", "Exa Search API key")
 	rootCmd.PersistentFlags().String("exa-endpoint", "", "Exa Search API endpoint")
-	rootCmd.PersistentFlags().String("tavily-api-key", "", "Tavily Search API key")
+	rootCmd.PersistentFlags().String("tavily-api-key", "", "Tavily Search API key (free monthly credits available)")
+	rootCmd.PersistentFlags().String("serper-api-key", "", "Serper Google search API key (free account available)")
+	rootCmd.PersistentFlags().String("serper-endpoint", "", "Serper Google search API endpoint")
 	rootCmd.PersistentFlags().String("tavily-endpoint", "", "Tavily Search API endpoint")
 	rootCmd.PersistentFlags().String("duckduckgo-endpoint", "", "DuckDuckGo HTML search endpoint")
 	rootCmd.PersistentFlags().String("bing-endpoint", "", "Bing HTML search endpoint")
@@ -119,6 +122,8 @@ func init() {
 	_ = viper.BindPFlag("exa_api_key", rootCmd.PersistentFlags().Lookup("exa-api-key"))
 	_ = viper.BindPFlag("exa_endpoint", rootCmd.PersistentFlags().Lookup("exa-endpoint"))
 	_ = viper.BindPFlag("tavily_api_key", rootCmd.PersistentFlags().Lookup("tavily-api-key"))
+	_ = viper.BindPFlag("serper_api_key", rootCmd.PersistentFlags().Lookup("serper-api-key"))
+	_ = viper.BindPFlag("serper_endpoint", rootCmd.PersistentFlags().Lookup("serper-endpoint"))
 	_ = viper.BindPFlag("tavily_endpoint", rootCmd.PersistentFlags().Lookup("tavily-endpoint"))
 	_ = viper.BindPFlag("duckduckgo_endpoint", rootCmd.PersistentFlags().Lookup("duckduckgo-endpoint"))
 	_ = viper.BindPFlag("bing_endpoint", rootCmd.PersistentFlags().Lookup("bing-endpoint"))
@@ -271,6 +276,7 @@ func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
 		{name: "searxng", endpoint: viper.GetString("searxng_url"), enabled: viper.GetString("searxng_url") != ""},
 		{name: "kagi", key: viper.GetString("kagi_api_key"), endpoint: viper.GetString("kagi_endpoint"), enabled: viper.GetString("kagi_api_key") != ""},
 		{name: "exa", key: viper.GetString("exa_api_key"), endpoint: viper.GetString("exa_endpoint"), enabled: viper.GetString("exa_api_key") != ""},
+		{name: "serper", key: viper.GetString("serper_api_key"), endpoint: viper.GetString("serper_endpoint"), enabled: viper.GetString("serper_api_key") != ""},
 		{name: "tavily", key: viper.GetString("tavily_api_key"), endpoint: viper.GetString("tavily_endpoint"), enabled: viper.GetString("tavily_api_key") != ""},
 	}
 	providers := make([]search.Provider, 0, len(configured))

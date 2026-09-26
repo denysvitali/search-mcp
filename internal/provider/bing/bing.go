@@ -169,6 +169,7 @@ func (b *Bing) searchPage(ctx context.Context, req search.Request, page int) ([]
 
 func bingResultsRelevant(query string, results []search.Result) bool {
 	var terms []string
+	seen := make(map[string]bool)
 	var site string
 	for _, word := range strings.Fields(strings.ToLower(query)) {
 		if strings.HasPrefix(word, "site:") {
@@ -176,8 +177,14 @@ func bingResultsRelevant(query string, results []search.Result) bool {
 			continue
 		}
 		word = strings.Trim(word, `"'()+-.,?!`)
-		if len(word) >= 4 {
+		// Common question words must not make unrelated results look useful.
+		switch word {
+		case "what", "where", "when", "which", "with", "that", "this", "from", "have", "does", "best":
+			continue
+		}
+		if len(word) >= 4 && !seen[word] {
 			terms = append(terms, word)
+			seen[word] = true
 		}
 	}
 	for _, result := range results {
@@ -191,10 +198,16 @@ func bingResultsRelevant(query string, results []search.Result) bool {
 			return true
 		}
 		content := strings.ToLower(result.Title + " " + result.Description + " " + result.URL)
+		matches := 0
 		for _, term := range terms {
 			if strings.Contains(content, term) {
-				return true
+				matches++
 			}
+		}
+		// A single generic overlap (e.g. "remove") is not enough for a
+		// multi-term query about removing coffee stains from cotton.
+		if matches >= max(1, (len(terms)+1)/2) {
+			return true
 		}
 	}
 	return false

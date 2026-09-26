@@ -117,3 +117,17 @@ func TestBingSiteRestriction(t *testing.T) {
 		t.Fatal("off-site result was accepted")
 	}
 }
+
+func TestBingRejectsGenericWordOverlap(t *testing.T) {
+	results := []search.Result{{Title: "Remove Background from Image", URL: "https://www.remove.bg/", Description: "Remove image backgrounds in seconds"}}
+	if bingResultsRelevant("how to remove coffee stains cotton", results) {
+		t.Fatal("generic remove overlap accepted unrelated SERP")
+	}
+	results[0] = search.Result{Title: "How to remove coffee stains from cotton", URL: "https://example.test/laundry"}
+	if !bingResultsRelevant("how to remove coffee stains cotton", results) {
+		t.Fatal("relevant general-web result rejected")
+	}
+	if !bingResultsRelevant("coffee coffee coffee stains", []search.Result{{Title: "Coffee stain removal", URL: "https://example.test/cleaning"}}) {
+		t.Fatal("repeated query words inflated threshold")
+	}
+}
