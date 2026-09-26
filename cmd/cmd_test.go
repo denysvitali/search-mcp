@@ -262,3 +262,16 @@ func TestInitConfig_IgnoresCwdConfig(t *testing.T) {
 		t.Errorf("log_level = %q, want %q (global config should win over cwd)", got, "debug")
 	}
 }
+
+func TestFreeSpecialistProvidersConfiguredWithoutKeys(t *testing.T) {
+	t.Setenv("SEARCH_MCP_PROVIDERS", "hackernews,stackexchange,crossref")
+	service, err := newSearchService(logrus.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"hackernews", "stackexchange", "crossref"} {
+		if service.Provider(name) == nil {
+			t.Fatalf("keyless provider %s was not enabled", name)
+		}
+	}
+}

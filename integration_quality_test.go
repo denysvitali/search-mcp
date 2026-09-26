@@ -17,21 +17,20 @@ import (
 func TestIntegrationQualityControls(t *testing.T) {
 	binary := buildBinary(t)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer integration-key" {
-			t.Error("missing API authorization")
+		if r.Header.Get("Authorization") != "" {
+			t.Error("keyless search sent authorization")
 		}
-		fmt.Fprint(w, `{"results":[
-            {"title":"First","url":"https://example.test/one","snippet":"An excerpt","date":"2026-09-01"},
+		fmt.Fprint(w, `{"hits":[
+            {"title":"First","url":"https://example.test/one","story_text":"An excerpt","created_at":"2026-09-01T00:00:00Z"},
             {"title":"Second","url":"https://example.test/two"},
             {"title":"Third","url":"https://other.test/three"}
         ]}`)
 	}))
 	defer mock.Close()
 	env := append(os.Environ(),
-		"SEARCH_MCP_PROVIDERS=duckduckgo",
-		"SEARCH_MCP_PERPLEXITY_API_KEY=integration-key",
-		"SEARCH_MCP_PERPLEXITY_ENDPOINT="+mock.URL,
-		"SEARCH_MCP_PROVIDER=perplexity",
+		"SEARCH_MCP_PROVIDERS=hackernews",
+		"SEARCH_MCP_HACKERNEWS_ENDPOINT="+mock.URL,
+		"SEARCH_MCP_PROVIDER=hackernews",
 		"SEARCH_MCP_INCLUDE_DOMAINS=example.test",
 		"SEARCH_MCP_EXCLUDE_DOMAINS=",
 		"SEARCH_MCP_MAX_PER_HOST=0",

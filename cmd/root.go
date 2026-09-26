@@ -12,14 +12,16 @@ import (
 	"github.com/denysvitali/search-mcp/internal/provider"
 	_ "github.com/denysvitali/search-mcp/internal/provider/bing"
 	_ "github.com/denysvitali/search-mcp/internal/provider/brave"
+	_ "github.com/denysvitali/search-mcp/internal/provider/crossref"
 	_ "github.com/denysvitali/search-mcp/internal/provider/duckduckgo"
 	_ "github.com/denysvitali/search-mcp/internal/provider/exa"
 	_ "github.com/denysvitali/search-mcp/internal/provider/google"
+	_ "github.com/denysvitali/search-mcp/internal/provider/hackernews"
 	_ "github.com/denysvitali/search-mcp/internal/provider/kagi"
 	_ "github.com/denysvitali/search-mcp/internal/provider/marginalia"
 	_ "github.com/denysvitali/search-mcp/internal/provider/mojeek"
-	_ "github.com/denysvitali/search-mcp/internal/provider/perplexity"
 	_ "github.com/denysvitali/search-mcp/internal/provider/searxng"
+	_ "github.com/denysvitali/search-mcp/internal/provider/stackexchange"
 	_ "github.com/denysvitali/search-mcp/internal/provider/tavily"
 	_ "github.com/denysvitali/search-mcp/internal/provider/wikipedia"
 	_ "github.com/denysvitali/search-mcp/internal/provider/yahoo"
@@ -74,14 +76,15 @@ func init() {
 	rootCmd.PersistentFlags().String("exa-endpoint", "", "Exa Search API endpoint")
 	rootCmd.PersistentFlags().String("tavily-api-key", "", "Tavily Search API key")
 	rootCmd.PersistentFlags().String("tavily-endpoint", "", "Tavily Search API endpoint")
-	rootCmd.PersistentFlags().String("perplexity-api-key", "", "Perplexity Search API key (enables the perplexity provider)")
-	rootCmd.PersistentFlags().String("perplexity-endpoint", "", "Perplexity Search API endpoint")
 	rootCmd.PersistentFlags().String("duckduckgo-endpoint", "", "DuckDuckGo HTML search endpoint")
 	rootCmd.PersistentFlags().String("bing-endpoint", "", "Bing HTML search endpoint")
 	rootCmd.PersistentFlags().String("google-endpoint", "", "Google HTML search endpoint")
 	rootCmd.PersistentFlags().String("marginalia-endpoint", "", "Marginalia public search API endpoint")
 	rootCmd.PersistentFlags().String("mojeek-endpoint", "", "Mojeek search HTML endpoint")
 	rootCmd.PersistentFlags().String("wikipedia-endpoint", "", "Wikipedia MediaWiki API endpoint")
+	rootCmd.PersistentFlags().String("hackernews-endpoint", "", "hackernews public search API endpoint")
+	rootCmd.PersistentFlags().String("stackexchange-endpoint", "", "stackexchange public search API endpoint")
+	rootCmd.PersistentFlags().String("crossref-endpoint", "", "crossref public search API endpoint")
 	rootCmd.PersistentFlags().String("yahoo-endpoint", "", "Yahoo search HTML endpoint")
 	rootCmd.PersistentFlags().String("searxng-url", "", "SearXNG instance URL (enables the searxng provider)")
 	rootCmd.PersistentFlags().Float64("rate-rps", 1, "requests per second per provider")
@@ -117,14 +120,15 @@ func init() {
 	_ = viper.BindPFlag("exa_endpoint", rootCmd.PersistentFlags().Lookup("exa-endpoint"))
 	_ = viper.BindPFlag("tavily_api_key", rootCmd.PersistentFlags().Lookup("tavily-api-key"))
 	_ = viper.BindPFlag("tavily_endpoint", rootCmd.PersistentFlags().Lookup("tavily-endpoint"))
-	_ = viper.BindPFlag("perplexity_api_key", rootCmd.PersistentFlags().Lookup("perplexity-api-key"))
-	_ = viper.BindPFlag("perplexity_endpoint", rootCmd.PersistentFlags().Lookup("perplexity-endpoint"))
 	_ = viper.BindPFlag("duckduckgo_endpoint", rootCmd.PersistentFlags().Lookup("duckduckgo-endpoint"))
 	_ = viper.BindPFlag("bing_endpoint", rootCmd.PersistentFlags().Lookup("bing-endpoint"))
 	_ = viper.BindPFlag("google_endpoint", rootCmd.PersistentFlags().Lookup("google-endpoint"))
 	_ = viper.BindPFlag("marginalia_endpoint", rootCmd.PersistentFlags().Lookup("marginalia-endpoint"))
 	_ = viper.BindPFlag("mojeek_endpoint", rootCmd.PersistentFlags().Lookup("mojeek-endpoint"))
 	_ = viper.BindPFlag("wikipedia_endpoint", rootCmd.PersistentFlags().Lookup("wikipedia-endpoint"))
+	_ = viper.BindPFlag("hackernews_endpoint", rootCmd.PersistentFlags().Lookup("hackernews-endpoint"))
+	_ = viper.BindPFlag("stackexchange_endpoint", rootCmd.PersistentFlags().Lookup("stackexchange-endpoint"))
+	_ = viper.BindPFlag("crossref_endpoint", rootCmd.PersistentFlags().Lookup("crossref-endpoint"))
 	_ = viper.BindPFlag("yahoo_endpoint", rootCmd.PersistentFlags().Lookup("yahoo-endpoint"))
 	_ = viper.BindPFlag("searxng_url", rootCmd.PersistentFlags().Lookup("searxng-url"))
 	_ = viper.BindPFlag("rate_rps", rootCmd.PersistentFlags().Lookup("rate-rps"))
@@ -222,12 +226,12 @@ func keylessProviderSet() (map[string]bool, error) {
 		names = defaultKeylessProviders
 	}
 	set := make(map[string]bool, len(names))
-	valid := map[string]bool{"duckduckgo": true, "bing": true, "google": true, "marginalia": true, "mojeek": true, "wikipedia": true, "yahoo": true}
+	valid := map[string]bool{"duckduckgo": true, "bing": true, "google": true, "marginalia": true, "mojeek": true, "hackernews": true, "stackexchange": true, "crossref": true, "wikipedia": true, "yahoo": true}
 	for _, entry := range names {
 		for name := range strings.SplitSeq(entry, ",") {
 			if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
 				if !valid[name] {
-					return nil, fmt.Errorf("unknown keyless provider %q; choose from bing, duckduckgo, google, marginalia, mojeek, wikipedia, yahoo", name)
+					return nil, fmt.Errorf("unknown keyless provider %q; choose from bing, crossref, duckduckgo, google, hackernews, marginalia, mojeek, stackexchange, wikipedia, yahoo", name)
 				}
 				set[name] = true
 			}
@@ -259,12 +263,14 @@ func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
 		{name: "marginalia", endpoint: viper.GetString("marginalia_endpoint"), enabled: enabledKeyless["marginalia"]},
 		{name: "mojeek", endpoint: viper.GetString("mojeek_endpoint"), enabled: enabledKeyless["mojeek"]},
 		{name: "wikipedia", endpoint: viper.GetString("wikipedia_endpoint"), enabled: enabledKeyless["wikipedia"]},
+		{name: "hackernews", endpoint: viper.GetString("hackernews_endpoint"), enabled: enabledKeyless["hackernews"]},
+		{name: "stackexchange", endpoint: viper.GetString("stackexchange_endpoint"), enabled: enabledKeyless["stackexchange"]},
+		{name: "crossref", endpoint: viper.GetString("crossref_endpoint"), enabled: enabledKeyless["crossref"]},
 		{name: "yahoo", endpoint: viper.GetString("yahoo_endpoint"), enabled: enabledKeyless["yahoo"]},
 		{name: "brave", key: viper.GetString("brave_api_key"), endpoint: viper.GetString("brave_endpoint"), enabled: viper.GetString("brave_api_key") != ""},
 		{name: "searxng", endpoint: viper.GetString("searxng_url"), enabled: viper.GetString("searxng_url") != ""},
 		{name: "kagi", key: viper.GetString("kagi_api_key"), endpoint: viper.GetString("kagi_endpoint"), enabled: viper.GetString("kagi_api_key") != ""},
 		{name: "exa", key: viper.GetString("exa_api_key"), endpoint: viper.GetString("exa_endpoint"), enabled: viper.GetString("exa_api_key") != ""},
-		{name: "perplexity", key: viper.GetString("perplexity_api_key"), endpoint: viper.GetString("perplexity_endpoint"), enabled: viper.GetString("perplexity_api_key") != ""},
 		{name: "tavily", key: viper.GetString("tavily_api_key"), endpoint: viper.GetString("tavily_endpoint"), enabled: viper.GetString("tavily_api_key") != ""},
 	}
 	providers := make([]search.Provider, 0, len(configured))

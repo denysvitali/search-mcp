@@ -3,8 +3,9 @@
 Go MCP server and CLI for web search.
 
 Provider implementations live in dedicated packages under `internal/provider/`
-(`duckduckgo`, `bing`, `google`, `marginalia`, `mojeek`, `wikipedia`, `yahoo`, `brave`,
-`searxng`, `kagi`, `exa`, `tavily`, and `perplexity`). Each package implements `search.Provider` and registers
+(`duckduckgo`, `bing`, `google`, `marginalia`, `mojeek`, `wikipedia`, `yahoo`,
+`hackernews`, `stackexchange`, `crossref`, `brave`, `searxng`, `kagi`, `exa`,
+and `tavily`). Each package implements `search.Provider` and registers
 its constructor from `init()`; the command imports the packages for
 registration and builds only the providers enabled by configuration.
 
@@ -25,19 +26,42 @@ required. Change the set with `--providers` (or `SEARCH_MCP_PROVIDERS`), e.g.
 - `wikipedia`: uses Wikipedia's public MediaWiki search API, with no key. It is useful for encyclopedic topics and supports `language` by searching that language's Wikipedia. Enable it with `--providers duckduckgo,yahoo,wikipedia`. It is opt-in because its encyclopedia index is a poor fit for general web and recent-news queries.
 - `mojeek`: scrapes `https://www.mojeek.com/search`. **Not enabled by default** — Mojeek currently answers datacenter IPs with an HTTP 200 captcha page regardless of User-Agent, so it costs a round trip while returning nothing. Re-enable it with `--providers duckduckgo,yahoo,mojeek` if your IP is served normally.
 
-### Keyed (enabled when configured)
+### Free specialist APIs (no signup or key)
+
+These are opt-in because their indexes cover specific subjects. Enable them
+with `--providers`; both CLI and MCP use the same configuration.
+
+- `hackernews`: [Algolia HN Search](https://hn.algolia.com/api), ranked by relevance with points and discussion counts. Links point to the original article, or the HN discussion for self-posts. `published` is the HN submission date, not necessarily the article's publication date.
+- `stackexchange`: [Stack Overflow advanced search](https://api.stackexchange.com/docs/advanced-search), ranked by relevance, with readable question excerpts, answer counts, and accepted-answer indicators. The provider respects response `backoff` and quota exhaustion. Public use is subject to the shared IP quota and [API throttles](https://api.stackexchange.com/docs/throttle).
+- `crossref`: [Crossref's public REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/), searching journal articles, conference papers, and preprints by title/author (excluding standalone figure/component records), and returning DOI links, authors, venues, publication dates, and abstracts when supplied. Metadata search is free; the linked publisher's full text may be paywalled. Abstract and date coverage varies by publisher.
+
+All three support `freshness`: `pd`/`pw`/`pm`/`py` (or `hour`, `day`, `week`,
+`month`, `year`). Crossref applies dates at day precision. Country, language,
+and safe-search settings do not apply to these specialist indexes. Public
+services still impose quotas and can fail; normal timeout, retry, caching,
+and fallback behavior applies.
+
+```sh
+# Technical articles and Q&A, with general web coverage:
+search-mcp search "Go context cancellation" --providers duckduckgo,yahoo,hackernews,stackexchange
+# Papers by bibliographic query:
+search-mcp search "Vaswani attention transformer" --providers crossref
+# Run MCP with the free technical providers:
+search-mcp serve --providers duckduckgo,yahoo,hackernews,stackexchange
+```
+
+### Existing optional API integrations (enabled only when configured)
 
 - `brave`: uses Brave Search API. Set `SEARCH_MCP_BRAVE_API_KEY` or `--brave-api-key`. `count` is clamped to Brave's maximum of 20; larger requests page via `offset`.
 - `searxng`: uses a SearXNG instance's JSON API. Set `SEARCH_MCP_SEARXNG_URL` or `--searxng-url`. The instance must have `format=json` enabled.
 - `kagi`: uses Kagi Search API. Set `SEARCH_MCP_KAGI_API_KEY` or `--kagi-api-key`.
 - `exa`: uses Exa Search API. Set `SEARCH_MCP_EXA_API_KEY` or `--exa-api-key`.
 - `tavily`: uses Tavily Search API. Set `SEARCH_MCP_TAVILY_API_KEY` or `--tavily-api-key`.
-- `perplexity`: uses the [Perplexity Search API](https://docs.perplexity.ai/api-reference/search-post), returning ranked URLs, query-relevant excerpts, and publication dates. Set `SEARCH_MCP_PERPLEXITY_API_KEY` or `--perplexity-api-key`. Supports country, two-letter language codes, and freshness (`pd`/`pw`/`pm`/`py` or `hour`/`day`/`week`/`month`/`year`). Web search returns at most 20 results without pagination. It requires a paid API key and is enabled only when configured; it does not call the Sonar answer-generation API. Safe-search is not supported by this backend.
 
 The HTML providers are scrapers fighting anti-bot systems, so treat them as
 best effort: expect roughly ten results per page and occasional blocks. The
 service fans out by default, detects soft challenge pages, skips failed
-providers, and reports them in `degraded`. The API-backed providers below are
+providers, and reports them in `degraded`. The existing keyed providers are
 optional compatibility integrations; with no API keys configured, the default
 free path never calls them.
 
@@ -62,6 +86,10 @@ provider: ""            # "" or "all" fans out; a name selects one provider
 providers:              # keyless providers to enable
   - duckduckgo
   - yahoo
+  # Free technical/research indexes (no keys):
+  # - hackernews
+  # - stackexchange
+  # - crossref
   # Add bing or wikipedia for your use case:
   # - bing
   # - wikipedia
@@ -73,8 +101,6 @@ searxng_url: ""
 kagi_api_key: ""
 exa_api_key: ""
 tavily_api_key: ""
-perplexity_api_key: ""
-perplexity_endpoint: ""
 include_domains: []     # search result filter, includes subdomains
 exclude_domains: []     # search result filter, exclusions win
 max_per_host: 0         # set to 2 for source diversity; 0 disables
@@ -85,6 +111,9 @@ marginalia_endpoint: ""
 mojeek_endpoint: ""
 wikipedia_endpoint: ""
 yahoo_endpoint: ""
+hackernews_endpoint: ""
+stackexchange_endpoint: ""
+crossref_endpoint: ""
 rate_rps: 1
 rate_burst: 2
 provider_timeout: 8s
@@ -148,7 +177,7 @@ maximum 50); negative counts or host limits are rejected.
 Every provider here fails independently and often, so the defaults are built
 around surviving that:
 
-- **Fan-out by default.** With no `--provider`, a query goes to every configured provider in parallel and the rankings are merged with reciprocal rank fusion, deduplicating by normalized URL. Providers that fail are reported in the response's `degraded` list rather than silently thinning the results, so a short result set is never mistaken for a healthy one. Results are cached in memory for `cache_ttl` to keep the extra load down.
+- **Fan-out by default.** With no `--provider`, a query goes to every configured provider in parallel and the rankings are merged with reciprocal rank fusion, deduplicating by normalized URL. Providers that fail are reported in the response's `degraded` list rather than silently thinning the results, so a short result set is never mistaken for a healthy one. Results are cached in memory for `cache_ttl` to keep the extra load down. Specialist APIs are opt-in; the default general-web set remains free and keyless.
 - **Fallback on any failure.** When you do name a provider, a failure of any kind — anti-bot block, rate limit, open circuit breaker, upstream 5xx, transport error, markup parse failure — moves on to the next provider. Successful fallback responses preserve earlier provider failures in `degraded`. Only caller cancellation stops the chain. If every provider fails, the error names each one and its own reason.
 - **Soft blocks are real errors.** Providers detect challenge pages served with a 2xx status, and treat a missing results container as a block too. That way a captcha or a change to upstream markup surfaces as an error and trips the circuit breaker, instead of masquerading as "no results found".
 - **Per-provider decorators.** Transient failures are retried with exponential backoff up to `retry_max_attempts`; repeated failures trip a per-provider circuit breaker (`breaker_threshold` / `breaker_cooldown`); successful responses are cached when `cache_ttl > 0`.
