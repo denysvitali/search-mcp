@@ -157,7 +157,6 @@ func TestServiceDefaultsCount(t *testing.T) {
 		in   int
 	}{
 		{"zero", 0},
-		{"negative", -5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			provider := &stubProvider{name: "first"}
@@ -178,7 +177,7 @@ func TestServiceDefaultsCount(t *testing.T) {
 	}
 }
 
-func TestServiceCountPreservedWhenPositive(t *testing.T) {
+func TestServiceRetrievesCandidatePoolForSmallCounts(t *testing.T) {
 	provider := &stubProvider{name: "first"}
 	service, err := NewService([]Provider{provider}, 100, 1, logrus.New())
 	if err != nil {
@@ -187,8 +186,8 @@ func TestServiceCountPreservedWhenPositive(t *testing.T) {
 	if _, err := service.Search(context.Background(), Request{Query: "test", Count: 3}); err != nil {
 		t.Fatal(err)
 	}
-	if provider.lastReq.Count != 3 {
-		t.Fatalf("count = %d, want 3", provider.lastReq.Count)
+	if provider.lastReq.Count != 10 {
+		t.Fatalf("candidate count = %d, want 10", provider.lastReq.Count)
 	}
 }
 

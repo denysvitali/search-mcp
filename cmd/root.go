@@ -18,6 +18,7 @@ import (
 	_ "github.com/denysvitali/search-mcp/internal/provider/kagi"
 	_ "github.com/denysvitali/search-mcp/internal/provider/marginalia"
 	_ "github.com/denysvitali/search-mcp/internal/provider/mojeek"
+	_ "github.com/denysvitali/search-mcp/internal/provider/perplexity"
 	_ "github.com/denysvitali/search-mcp/internal/provider/searxng"
 	_ "github.com/denysvitali/search-mcp/internal/provider/tavily"
 	_ "github.com/denysvitali/search-mcp/internal/provider/wikipedia"
@@ -73,6 +74,8 @@ func init() {
 	rootCmd.PersistentFlags().String("exa-endpoint", "", "Exa Search API endpoint")
 	rootCmd.PersistentFlags().String("tavily-api-key", "", "Tavily Search API key")
 	rootCmd.PersistentFlags().String("tavily-endpoint", "", "Tavily Search API endpoint")
+	rootCmd.PersistentFlags().String("perplexity-api-key", "", "Perplexity Search API key (enables the perplexity provider)")
+	rootCmd.PersistentFlags().String("perplexity-endpoint", "", "Perplexity Search API endpoint")
 	rootCmd.PersistentFlags().String("duckduckgo-endpoint", "", "DuckDuckGo HTML search endpoint")
 	rootCmd.PersistentFlags().String("bing-endpoint", "", "Bing HTML search endpoint")
 	rootCmd.PersistentFlags().String("google-endpoint", "", "Google HTML search endpoint")
@@ -114,6 +117,8 @@ func init() {
 	_ = viper.BindPFlag("exa_endpoint", rootCmd.PersistentFlags().Lookup("exa-endpoint"))
 	_ = viper.BindPFlag("tavily_api_key", rootCmd.PersistentFlags().Lookup("tavily-api-key"))
 	_ = viper.BindPFlag("tavily_endpoint", rootCmd.PersistentFlags().Lookup("tavily-endpoint"))
+	_ = viper.BindPFlag("perplexity_api_key", rootCmd.PersistentFlags().Lookup("perplexity-api-key"))
+	_ = viper.BindPFlag("perplexity_endpoint", rootCmd.PersistentFlags().Lookup("perplexity-endpoint"))
 	_ = viper.BindPFlag("duckduckgo_endpoint", rootCmd.PersistentFlags().Lookup("duckduckgo-endpoint"))
 	_ = viper.BindPFlag("bing_endpoint", rootCmd.PersistentFlags().Lookup("bing-endpoint"))
 	_ = viper.BindPFlag("google_endpoint", rootCmd.PersistentFlags().Lookup("google-endpoint"))
@@ -259,6 +264,7 @@ func newSearchService(logger logrus.FieldLogger) (*search.Service, error) {
 		{name: "searxng", endpoint: viper.GetString("searxng_url"), enabled: viper.GetString("searxng_url") != ""},
 		{name: "kagi", key: viper.GetString("kagi_api_key"), endpoint: viper.GetString("kagi_endpoint"), enabled: viper.GetString("kagi_api_key") != ""},
 		{name: "exa", key: viper.GetString("exa_api_key"), endpoint: viper.GetString("exa_endpoint"), enabled: viper.GetString("exa_api_key") != ""},
+		{name: "perplexity", key: viper.GetString("perplexity_api_key"), endpoint: viper.GetString("perplexity_endpoint"), enabled: viper.GetString("perplexity_api_key") != ""},
 		{name: "tavily", key: viper.GetString("tavily_api_key"), endpoint: viper.GetString("tavily_endpoint"), enabled: viper.GetString("tavily_api_key") != ""},
 	}
 	providers := make([]search.Provider, 0, len(configured))
@@ -300,6 +306,10 @@ func renderResults(resp search.Response) string {
 		fmt.Fprintf(&b, "%d. %s\n", i+1, titleStyle.Render(result.Title))
 		if result.URL != "" {
 			fmt.Fprintf(&b, "   %s\n", urlStyle.Render(result.URL))
+		}
+		if result.Source != "" || result.Published != "" {
+			metadata := strings.TrimSpace(strings.Join([]string{result.Source, result.Published}, "  "))
+			fmt.Fprintf(&b, "   %s\n", mutedStyle.Render(metadata))
 		}
 		if result.Description != "" {
 			fmt.Fprintf(&b, "   %s\n", result.Description)

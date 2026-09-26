@@ -11,6 +11,10 @@ type Request struct {
 	Freshness    string
 	Provider     string
 	ExtraHeaders map[string]string
+	// Result filters are applied locally, consistently across all providers.
+	IncludeDomains []string
+	ExcludeDomains []string
+	MaxPerHost     int
 }
 
 type Result struct {
@@ -22,9 +26,8 @@ type Result struct {
 }
 
 // ProviderFailure records a provider that could not be reached or refused to
-// answer during a fan-out search. It is reported alongside the results that the
-// surviving providers did return, so a thin result set is distinguishable from
-// a healthy search that genuinely found little.
+// answer during a fan-out or fallback search. It is reported alongside the
+// results that surviving providers returned.
 type ProviderFailure struct {
 	Provider string `json:"provider"`
 	Error    string `json:"error"`
@@ -34,7 +37,7 @@ type Response struct {
 	Query    string   `json:"query"`
 	Provider string   `json:"provider"`
 	Results  []Result `json:"results"`
-	// Degraded lists the providers that failed during a fan-out search. Empty
+	// Degraded lists the providers that failed during a fan-out or fallback. Empty
 	// when every provider answered.
 	Degraded []ProviderFailure `json:"degraded,omitempty"`
 }

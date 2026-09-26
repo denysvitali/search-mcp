@@ -138,8 +138,19 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 		return Response{}, errors.New("query is required")
 	}
 	req.Provider = strings.ToLower(strings.TrimSpace(req.Provider))
-	if req.Count <= 0 {
+	if req.Count < 0 || req.MaxPerHost < 0 {
+		return Response{}, errors.New("count and max_per_host must not be negative")
+	}
+	if req.Count == 0 {
 		req.Count = 10
+	}
+	req.Count = min(req.Count, MaxResultCount)
+	var err error
+	if req.IncludeDomains, err = normalizeDomains(req.IncludeDomains); err != nil {
+		return Response{}, err
+	}
+	if req.ExcludeDomains, err = normalizeDomains(req.ExcludeDomains); err != nil {
+		return Response{}, err
 	}
 	if req.Provider == "" {
 		// With no provider requested, fan out to every configured provider and
@@ -167,8 +178,8 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 	)
 
 	// Build the deterministic attempt order: the primary provider first, then the
-	// remaining providers sorted by name. Fan-out only kicks in when a provider
-	// returns a fallback-worthy error (rate limited / blocked).
+	// remaining providers sorted by name. Any failure or empty selection falls
+	// through to the next provider.
 	order := []string{primary}
 	for _, name := range s.ProviderNames() {
 		if name != primary {
@@ -179,6 +190,7 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 	var errs []error
 	var emptyResp *Response
 	hadError := false
+	var degraded []ProviderFailure
 	for i, name := range order {
 		// Respect context cancellation/deadlines before each attempt; do not fall
 		// back when the caller has already given up.
@@ -189,6 +201,9 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 		attempt := req
 		attempt.Provider = name
 		resp, err := s.searchOne(ctx, span, attempt)
+		if err == nil {
+			resp.Results = selectResults(resp.Results, req)
+		}
 		if err == nil && len(resp.Results) == 0 {
 			// Public HTML providers sometimes answer bot mitigation with a
 			// syntactically valid page that contains no result nodes. An empty
@@ -212,11 +227,13 @@ func (s *Service) Search(ctx context.Context, req Request) (Response, error) {
 				))
 			}
 			resp.Provider = name
+			resp.Degraded = append(degraded, resp.Degraded...)
 			return resp, nil
 		}
 
 		errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		hadError = true
+		degraded = append(degraded, ProviderFailure{Provider: name, Error: err.Error()})
 
 		// The caller's context is the only thing that stops the chain. Surface
 		// its own error so the real cancellation/deadline reason is not masked
@@ -273,7 +290,18 @@ func (s *Service) searchOne(ctx context.Context, span trace.Span, req Request) (
 		return Response{}, err
 	}
 
-	resp, err := provider.Search(ctx, req)
+	attempt := req
+	attempt.Count = candidateCount(req)
+	// These options operate on merged results, never on provider/cache state.
+	attempt.IncludeDomains = nil
+	attempt.ExcludeDomains = nil
+	attempt.MaxPerHost = 0
+	resp, err := provider.Search(ctx, attempt)
+	if err == nil {
+		resp.Query = req.Query
+		resp.Provider = req.Provider
+		resp.Results = fuseResults([]Response{resp}, attempt.Count)
+	}
 	status := "ok"
 	if err != nil {
 		status = "error"

@@ -4,7 +4,7 @@ Go MCP server and CLI for web search.
 
 Provider implementations live in dedicated packages under `internal/provider/`
 (`duckduckgo`, `bing`, `google`, `marginalia`, `mojeek`, `wikipedia`, `yahoo`, `brave`,
-`searxng`, `kagi`, `exa`, and `tavily`). Each package implements `search.Provider` and registers
+`searxng`, `kagi`, `exa`, `tavily`, and `perplexity`). Each package implements `search.Provider` and registers
 its constructor from `init()`; the command imports the packages for
 registration and builds only the providers enabled by configuration.
 
@@ -32,6 +32,7 @@ required. Change the set with `--providers` (or `SEARCH_MCP_PROVIDERS`), e.g.
 - `kagi`: uses Kagi Search API. Set `SEARCH_MCP_KAGI_API_KEY` or `--kagi-api-key`.
 - `exa`: uses Exa Search API. Set `SEARCH_MCP_EXA_API_KEY` or `--exa-api-key`.
 - `tavily`: uses Tavily Search API. Set `SEARCH_MCP_TAVILY_API_KEY` or `--tavily-api-key`.
+- `perplexity`: uses the [Perplexity Search API](https://docs.perplexity.ai/api-reference/search-post), returning ranked URLs, query-relevant excerpts, and publication dates. Set `SEARCH_MCP_PERPLEXITY_API_KEY` or `--perplexity-api-key`. Supports country, two-letter language codes, and freshness (`pd`/`pw`/`pm`/`py` or `hour`/`day`/`week`/`month`/`year`). Web search returns at most 20 results without pagination. It requires a paid API key and is enabled only when configured; it does not call the Sonar answer-generation API. Safe-search is not supported by this backend.
 
 The HTML providers are scrapers fighting anti-bot systems, so treat them as
 best effort: expect roughly ten results per page and occasional blocks. The
@@ -46,6 +47,8 @@ free path never calls them.
 go run . search "model context protocol"                        # fans out to every provider
 go run . search "model context protocol" --provider duckduckgo  # one provider, with fallback
 go run . search "open telemetry go" --providers duckduckgo,yahoo,wikipedia --count 5
+go run . search "Go concurrency" --include-domains go.dev,pkg.go.dev --count 5
+go run . search "distributed tracing" --exclude-domains pinterest.com --max-per-host 2
 go run . read https://github.com/golang/go/issues/64876
 go run . serve
 ```
@@ -70,6 +73,11 @@ searxng_url: ""
 kagi_api_key: ""
 exa_api_key: ""
 tavily_api_key: ""
+perplexity_api_key: ""
+perplexity_endpoint: ""
+include_domains: []     # search result filter, includes subdomains
+exclude_domains: []     # search result filter, exclusions win
+max_per_host: 0         # set to 2 for source diversity; 0 disables
 duckduckgo_endpoint: ""
 bing_endpoint: ""
 google_endpoint: ""
@@ -99,19 +107,55 @@ otel_exporter: stdout
 otel_endpoint: ""
 ```
 
+## Result quality and source selection
+
+CLI, MCP `search`, and MCP `search_batch` use the same result pipeline:
+
+- Reciprocal rank fusion rewards agreement between providers. Repeated URLs
+  within one provider count once, including tracking-parameter variants.
+- Searches retrieve at least ten candidates per provider before returning the
+  requested count, so even `count=1` can find agreement below the first rank.
+  Domain filters or a host limit expand this to up to three times the requested
+  count, capped at 50 candidates per provider. Individual backend limits still
+  apply. This can increase pagination/API usage; the unfiltered default count of
+  ten still requests ten candidates.
+- Missing titles fall back to URLs; duplicate hits contribute the longest
+  available snippet and fill missing titles and publication dates. Invalid URLs
+  are removed in both single-provider and merged searches. CLI output shows each
+  result's provider sources and publication date when supplied.
+- `--include-domains`, `--exclude-domains`, and `--max-per-host` select sources
+  after retrieval and ranking, before the final count limit. Use hostnames such
+  as `go.dev`, without a scheme, path, or wildcard. Domain rules include
+  subdomains, exclusions win, and `www.` variants share the same host limit.
+  Other subdomains count separately. These are local result filters, so they
+  may return fewer results and do not constrain which services receive the query.
+  Use a provider-supported `site:` query when you need upstream site targeting.
+
+MCP uses `include_domains`/`exclude_domains` arrays and `max_per_host`:
+
+```json
+{"query":"Go concurrency","include_domains":["go.dev","pkg.go.dev"],"max_per_host":2,"count":5}
+```
+
+Omitted MCP options inherit configuration; explicit empty domain arrays clear
+configured filters, and `max_per_host: 0` disables a configured host limit.
+Search filters are separate from `allow_domains`/`block_domains`, which control
+what the page reader can fetch. Result counts are best effort (default 10,
+maximum 50); negative counts or host limits are rejected.
+
 ## Reliability
 
 Every provider here fails independently and often, so the defaults are built
 around surviving that:
 
 - **Fan-out by default.** With no `--provider`, a query goes to every configured provider in parallel and the rankings are merged with reciprocal rank fusion, deduplicating by normalized URL. Providers that fail are reported in the response's `degraded` list rather than silently thinning the results, so a short result set is never mistaken for a healthy one. Results are cached in memory for `cache_ttl` to keep the extra load down.
-- **Fallback on any failure.** When you do name a provider, a failure of any kind — anti-bot block, rate limit, open circuit breaker, upstream 5xx, transport error, markup parse failure — moves on to the next provider. Only caller cancellation stops the chain. If every provider fails, the error names each one and its own reason.
+- **Fallback on any failure.** When you do name a provider, a failure of any kind — anti-bot block, rate limit, open circuit breaker, upstream 5xx, transport error, markup parse failure — moves on to the next provider. Successful fallback responses preserve earlier provider failures in `degraded`. Only caller cancellation stops the chain. If every provider fails, the error names each one and its own reason.
 - **Soft blocks are real errors.** Providers detect challenge pages served with a 2xx status, and treat a missing results container as a block too. That way a captcha or a change to upstream markup surfaces as an error and trips the circuit breaker, instead of masquerading as "no results found".
 - **Per-provider decorators.** Transient failures are retried with exponential backoff up to `retry_max_attempts`; repeated failures trip a per-provider circuit breaker (`breaker_threshold` / `breaker_cooldown`); successful responses are cached when `cache_ttl > 0`.
 
 ## MCP tools
 
-- `search` — run a query, fanning out across providers by default. `count` is best effort: free HTML backends carry roughly ten results per page and at most three pages. The response includes `degraded` when a provider was unavailable.
+- `search` — run a query, fanning out across providers by default. `count` is best effort: free HTML backends carry roughly ten results per page and at most three pages. Supports domain filters and per-host limits. The response includes `degraded` when a provider was unavailable, including during fallback.
 - `search_batch` — run up to ten queries in parallel; returns an ordered `items` array with exactly one `{query, response}` or `{query, error}` entry per input query, including duplicates. Legacy `responses`/`errors` fields are retained for older clients, but the map cannot preserve duplicate query strings.
 - `web_read` — fetch a URL and return Markdown, with `max_length`/`start_index` for chunked reads, `query` to grep within the page, and `links` to list its links. Several hosts are pulled through their native APIs and rendered as structured Markdown: GitHub repos / issues / pull-requests / blobs, GitLab issues and merge requests, Gerrit changes, Gitiles trees and blobs, Reddit comment threads, Hacker News items, Lobsters stories, Stack Overflow questions, Wikipedia articles, arXiv abstracts, pkg.go.dev packages, and YouTube videos with public transcripts. Everything else is fetched as HTML and converted via `html-to-markdown`, with RSS/Atom, JSON and PDF handled by content type.
 - `read_pdf` — fetch a PDF and return selected page ranges or case-insensitive search matches with page numbers and optional line context. It never returns PDF bytes.

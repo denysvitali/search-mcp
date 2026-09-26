@@ -25,6 +25,8 @@ Two entry points share one `search.Service`:
 
 ### Search pipeline
 
+`search.Service` (`internal/search/service.go`) applies shared result normalization and local domain/host filtering (`selection.go`) for both entry points. It retrieves at least ten candidates per provider, or up to 3× the requested count (maximum 50) with filters/diversity enabled, before final selection. Provider/cache requests do not carry these local filters. Each provider contributes one RRF vote per normalized URL; duplicates enrich metadata. Successful fallback responses report earlier failures in `degraded`.
+
 `search.Service` (`internal/search/service.go`) holds a `map[name]Provider` and a `map[name]*rate.Limiter` (one `golang.org/x/time/rate.Limiter` per provider, sized by `--rate-rps` / `--rate-burst`). It emits OTel spans + a `search_requests_total` counter and a `search_request_duration_ms` histogram (both gracefully nil if the meter rejects them).
 
 **An empty `Request.Provider` means fan-out** (`AllProviders`, i.e. `"all"`), not "pick the first provider". `searchAll` (`merge.go`) queries every provider in parallel, merges with reciprocal rank fusion (`rrfK = 60`) deduplicating on `normalizeResultURL`, and reports the providers that failed in `Response.Degraded`. This is the default because every public backend fails independently and often.
@@ -59,6 +61,7 @@ Providers that can paginate loop over `searchPage(ctx, req, page)` until they ha
 - `mojeek`: GETs `https://www.mojeek.com/search`, parses `ul.results-standard > li`. HTTP 429 → `ErrRateLimited`. Freshness mapped to `since=YYYYMMDD`. **Not in the default provider set** — it serves datacenter IPs an HTTP 200 captcha regardless of User-Agent.
 - `brave`: JSON API at `https://api.search.brave.com/res/v1/web/search`, header `X-Subscription-Token`. `count` is clamped to `braveMaxCount` (20 — larger values are a 422); larger requests page via `offset` (0-9) and stop early on a short page, since each page is a billed call. Two constructors: `NewBrave` (back-compat, records key error) and `NewBraveChecked` (returns the error). Only registered when `--brave-api-key` is set.
 - `searxng`: JSON API at `<base>/search?format=json`, pages via `pageno`.
+- `perplexity`: opt-in POST to `https://api.perplexity.ai/search` using bearer auth. Web search caps at 20 without pagination; maps language/country/recency filters and returns excerpts and publication dates. Enable with `SEARCH_MCP_PERPLEXITY_API_KEY`.
 
 `search.SplitPublished` (`internal/search/dateparse.go`) lifts the `"Jul 16, 2025 · "`-style date prefix that Yahoo and DuckDuckGo bury in the snippet into `Result.Published`, normalised to `YYYY-MM-DD`.
 
@@ -78,7 +81,7 @@ Site-specific readers: `github.go` (repos + issues/PRs via the GitHub API), `red
 
 Priority: flags > `SEARCH_MCP_*` env > `$HOME/.config/search-mcp/search-mcp.yaml`. Config search intentionally **does not** look in `.` so another project's `search-mcp.yaml` can't shadow the user's — use `--config <path>` to point at a project-local file. All keys are listed in `cmd/root.go` (both flag + `viper.BindPFlag` lines).
 
-`--providers` selects the keyless provider set (default `duckduckgo,bing,yahoo` — see `defaultKeylessProviders`); Google, Marginalia, and Mojeek are opt-in; keyed providers are still enabled by the presence of their API key. `keylessProviderSet` splits entries on commas because viper hands a `SEARCH_MCP_PROVIDERS` env var through as a single string, so `"a,b"` would otherwise arrive as a single unmatchable name. `--http-token` is mandatory when `--http` binds beyond loopback.
+`--providers` selects the keyless provider set (default `duckduckgo,yahoo` — see `defaultKeylessProviders`); Google, Marginalia, and Mojeek are opt-in; keyed providers are still enabled by the presence of their API key. `keylessProviderSet` splits entries on commas because viper hands a `SEARCH_MCP_PROVIDERS` env var through as a single string, so `"a,b"` would otherwise arrive as a single unmatchable name. `--http-token` is mandatory when `--http` binds beyond loopback.
 
 ## Conventions
 

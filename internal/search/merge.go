@@ -72,14 +72,14 @@ func (s *Service) searchAll(ctx context.Context, span trace.Span, req Request) (
 		span.SetAttributes(attribute.Int("search.fanout.degraded", len(degraded)))
 	}
 
-	merged := fuseResults(responses, req.Count)
+	merged := selectResults(fuseResults(responses, 0), req)
 	return Response{Query: req.Query, Provider: AllProviders, Results: merged, Degraded: degraded}, nil
 }
 
 // fuseResults merges per-provider rankings with reciprocal rank fusion:
 // score(doc) = Σ 1/(rrfK + rank). The first occurrence of a URL supplies the
-// displayed title/description; Source accumulates every provider that
-// returned it.
+// displayed URL; missing metadata is filled from subsequent occurrences.
+// Each provider contributes at most one vote per document.
 func fuseResults(responses []Response, count int) []Result {
 	type fused struct {
 		result  Result
@@ -90,7 +90,9 @@ func fuseResults(responses []Response, count int) []Result {
 	var order []string
 
 	for _, resp := range responses {
-		for rank, result := range resp.Results {
+		seen := make(map[string]bool)
+		rank := 0
+		for _, result := range resp.Results {
 			result.Title = strings.TrimSpace(result.Title)
 			result.URL = strings.TrimSpace(result.URL)
 			if result.URL == "" {
@@ -99,7 +101,7 @@ func fuseResults(responses []Response, count int) []Result {
 				continue
 			}
 			parsed, err := url.Parse(result.URL)
-			if err != nil || parsed.Host == "" || (strings.ToLower(parsed.Scheme) != "http" && strings.ToLower(parsed.Scheme) != "https") {
+			if err != nil || parsed.Hostname() == "" || parsed.User != nil || (strings.ToLower(parsed.Scheme) != "http" && strings.ToLower(parsed.Scheme) != "https") {
 				// Provider APIs occasionally leak an internal relative link or a
 				// malformed redirect. Keep the merged contract absolute and safe.
 				continue
@@ -111,14 +113,33 @@ func fuseResults(responses []Response, count int) []Result {
 				result.Title = result.URL
 			}
 			key := normalizeResultURL(result.URL)
+			if result.Source == "" {
+				result.Source = resp.Provider
+			}
+			result.Description = strings.Join(strings.Fields(result.Description), " ")
 			entry, ok := byURL[key]
 			if !ok {
 				entry = &fused{result: result}
 				byURL[key] = entry
 				order = append(order, key)
+			} else {
+				if entry.result.Title == entry.result.URL && result.Title != result.URL {
+					entry.result.Title = result.Title
+				}
+				if len(result.Description) > len(entry.result.Description) {
+					entry.result.Description = result.Description
+				}
+				if entry.result.Published == "" {
+					entry.result.Published = result.Published
+				}
 			}
-			entry.score += 1.0 / float64(rrfK+rank+1)
-			if !slices.Contains(entry.sources, result.Source) {
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			rank++
+			entry.score += 1.0 / float64(rrfK+rank)
+			if result.Source != "" && !slices.Contains(entry.sources, result.Source) {
 				entry.sources = append(entry.sources, result.Source)
 			}
 		}
@@ -155,10 +176,15 @@ func NormalizeResultURL(raw string) string {
 	host = strings.TrimPrefix(host, "www.")
 	if port := u.Port(); port != "" && port != "80" && port != "443" {
 		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
 	}
 	u.Host = host
 	u.Fragment = ""
-	u.Path = strings.TrimRight(u.Path, "/")
+	// Trim only literal slashes. A percent-encoded slash can be part of a
+	// document identifier and must not be decoded into a path separator.
+	u.RawPath = strings.TrimRight(u.EscapedPath(), "/")
+	u.Path, _ = url.PathUnescape(u.RawPath)
 	query := u.Query()
 	for key := range query {
 		lower := strings.ToLower(key)

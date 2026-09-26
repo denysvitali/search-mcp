@@ -38,7 +38,7 @@ const (
 	// maxResultCount caps the requested result count. The keyless HTML backends
 	// carry roughly ten organic rows per page and page at most three deep, so a
 	// far higher ceiling would only advertise results that cannot be delivered.
-	maxResultCount = 50
+	maxResultCount = searchdomain.MaxResultCount
 	// maxPDFContextLines bounds surrounding lines returned for each PDF match.
 	maxPDFContextLines = 10
 	// maxPDFResults bounds pages or matches returned by read_pdf.
@@ -48,24 +48,30 @@ const (
 // searchArgs is the typed input for the search tool; the SDK derives the
 // input schema from it and validates arguments before the handler runs.
 type searchArgs struct {
-	Query      string `json:"query" jsonschema:"Search query"`
-	Provider   string `json:"provider,omitempty" jsonschema:"Configured provider name. Omit (recommended) to fan out to every configured provider and merge their rankings, which is the most resilient option; name one only to target a specific backend."`
-	Count      *int   `json:"count,omitempty" jsonschema:"Best-effort maximum number of results, up to 50. Keyless HTML backends carry about ten results per page and page three deep, so large values may return fewer."`
-	Country    string `json:"country,omitempty" jsonschema:"Provider country code"`
-	Language   string `json:"language,omitempty" jsonschema:"Provider language code"`
-	SafeSearch string `json:"safe_search,omitempty" jsonschema:"Provider safe search mode"`
-	Freshness  string `json:"freshness,omitempty" jsonschema:"Provider freshness filter"`
+	Query          string   `json:"query" jsonschema:"Search query"`
+	Provider       string   `json:"provider,omitempty" jsonschema:"Configured provider name. Omit (recommended) to fan out to every configured provider and merge their rankings, which is the most resilient option; name one only to target a specific backend."`
+	Count          *int     `json:"count,omitempty" jsonschema:"Best-effort maximum number of results, up to 50. Keyless HTML backends carry about ten results per page and page three deep, so large values may return fewer."`
+	Country        string   `json:"country,omitempty" jsonschema:"Provider country code"`
+	Language       string   `json:"language,omitempty" jsonschema:"Provider language code"`
+	SafeSearch     string   `json:"safe_search,omitempty" jsonschema:"Provider safe search mode"`
+	Freshness      string   `json:"freshness,omitempty" jsonschema:"Provider freshness filter"`
+	IncludeDomains []string `json:"include_domains,omitempty" jsonschema:"Only return results from these hostnames and subdomains. Applied locally; count is best effort. An empty array clears the configured filter."`
+	ExcludeDomains []string `json:"exclude_domains,omitempty" jsonschema:"Exclude results from these hostnames and subdomains. An empty array clears the configured filter."`
+	MaxPerHost     *int     `json:"max_per_host,omitempty" jsonschema:"Maximum results per hostname; 0 disables the limit. Use 2 for source diversity."`
 }
 
 // batchSearchArgs is the typed input for the search_batch tool.
 type batchSearchArgs struct {
-	Queries    []string `json:"queries" jsonschema:"Search queries to run in parallel, maximum 10"`
-	Provider   string   `json:"provider,omitempty" jsonschema:"Configured provider name. Omit (recommended) to fan out to every configured provider and merge their rankings; name one only to target a specific backend."`
-	Count      *int     `json:"count,omitempty" jsonschema:"Best-effort maximum number of results per query, up to 50. Keyless HTML backends carry about ten results per page, so large values may return fewer."`
-	Country    string   `json:"country,omitempty" jsonschema:"Provider country code"`
-	Language   string   `json:"language,omitempty" jsonschema:"Provider language code"`
-	SafeSearch string   `json:"safe_search,omitempty" jsonschema:"Provider safe search mode"`
-	Freshness  string   `json:"freshness,omitempty" jsonschema:"Provider freshness filter"`
+	Queries        []string `json:"queries" jsonschema:"Search queries to run in parallel, maximum 10"`
+	Provider       string   `json:"provider,omitempty" jsonschema:"Configured provider name. Omit (recommended) to fan out to every configured provider and merge their rankings; name one only to target a specific backend."`
+	Count          *int     `json:"count,omitempty" jsonschema:"Best-effort maximum number of results per query, up to 50. Keyless HTML backends carry about ten results per page, so large values may return fewer."`
+	Country        string   `json:"country,omitempty" jsonschema:"Provider country code"`
+	Language       string   `json:"language,omitempty" jsonschema:"Provider language code"`
+	SafeSearch     string   `json:"safe_search,omitempty" jsonschema:"Provider safe search mode"`
+	Freshness      string   `json:"freshness,omitempty" jsonschema:"Provider freshness filter"`
+	IncludeDomains []string `json:"include_domains,omitempty" jsonschema:"Only return results from these hostnames and subdomains. Applied locally; count is best effort. An empty array clears the configured filter."`
+	ExcludeDomains []string `json:"exclude_domains,omitempty" jsonschema:"Exclude results from these hostnames and subdomains. An empty array clears the configured filter."`
+	MaxPerHost     *int     `json:"max_per_host,omitempty" jsonschema:"Maximum results per hostname; 0 disables the limit. Use 2 for source diversity."`
 }
 
 // batchSearchItem preserves one outcome for every input query, including
@@ -232,6 +238,14 @@ func clampCount(v int) (int, error) {
 	return v, nil
 }
 
+// domainsOrDefault distinguishes omitted filters from explicit empty arrays.
+func domainsOrDefault(domains []string, key string) []string {
+	if domains == nil {
+		return viper.GetStringSlice(key)
+	}
+	return domains
+}
+
 // intOrDefault dereferences an optional integer argument, falling back to the
 // given default when the client omitted it.
 func intOrDefault(v *int, def int) int {
@@ -271,13 +285,16 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 		searchCtx, cancel := withConfiguredTimeout(ctx, viper.GetDuration("search_timeout"))
 		defer cancel()
 		resp, err := service.Search(searchCtx, searchdomain.Request{
-			Query:      args.Query,
-			Provider:   valueOrDefault(args.Provider, viper.GetString("provider")),
-			Count:      count,
-			Country:    valueOrDefault(args.Country, viper.GetString("country")),
-			Language:   valueOrDefault(args.Language, viper.GetString("language")),
-			SafeSearch: valueOrDefault(args.SafeSearch, viper.GetString("safe_search")),
-			Freshness:  valueOrDefault(args.Freshness, viper.GetString("freshness")),
+			Query:          args.Query,
+			Provider:       valueOrDefault(args.Provider, viper.GetString("provider")),
+			Count:          count,
+			Country:        valueOrDefault(args.Country, viper.GetString("country")),
+			Language:       valueOrDefault(args.Language, viper.GetString("language")),
+			SafeSearch:     valueOrDefault(args.SafeSearch, viper.GetString("safe_search")),
+			Freshness:      valueOrDefault(args.Freshness, viper.GetString("freshness")),
+			IncludeDomains: domainsOrDefault(args.IncludeDomains, "include_domains"),
+			ExcludeDomains: domainsOrDefault(args.ExcludeDomains, "exclude_domains"),
+			MaxPerHost:     intOrDefault(args.MaxPerHost, viper.GetInt("max_per_host")),
 		})
 		if err != nil {
 			return nil, searchdomain.Response{}, err
@@ -303,12 +320,15 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 		batchCtx, cancel := withConfiguredTimeout(ctx, viper.GetDuration("batch_timeout"))
 		defer cancel()
 		result := runBatchSearch(batchCtx, service, args.Queries, searchdomain.Request{
-			Provider:   valueOrDefault(args.Provider, viper.GetString("provider")),
-			Count:      count,
-			Country:    valueOrDefault(args.Country, viper.GetString("country")),
-			Language:   valueOrDefault(args.Language, viper.GetString("language")),
-			SafeSearch: valueOrDefault(args.SafeSearch, viper.GetString("safe_search")),
-			Freshness:  valueOrDefault(args.Freshness, viper.GetString("freshness")),
+			Provider:       valueOrDefault(args.Provider, viper.GetString("provider")),
+			Count:          count,
+			Country:        valueOrDefault(args.Country, viper.GetString("country")),
+			Language:       valueOrDefault(args.Language, viper.GetString("language")),
+			SafeSearch:     valueOrDefault(args.SafeSearch, viper.GetString("safe_search")),
+			Freshness:      valueOrDefault(args.Freshness, viper.GetString("freshness")),
+			IncludeDomains: domainsOrDefault(args.IncludeDomains, "include_domains"),
+			ExcludeDomains: domainsOrDefault(args.ExcludeDomains, "exclude_domains"),
+			MaxPerHost:     intOrDefault(args.MaxPerHost, viper.GetInt("max_per_host")),
 		})
 		return structuredResult(), result, nil
 	})
