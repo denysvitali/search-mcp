@@ -1,1 +1,5 @@
 /dist/
+
+# Local CLI build outputs
+/search-mcp
+/search-mcp.exe
