@@ -114,10 +114,10 @@ func TestCache_KeyStableAcrossRelevantFields(t *testing.T) {
 	if cacheKey(a) != cacheKey(b) {
 		t.Fatal("identical requests must share a key")
 	}
-	// ExtraHeaders must not affect the key.
+	// Headers can affect upstream identity and must isolate cached responses.
 	a.ExtraHeaders = map[string]string{"User-Agent": "x"}
-	if cacheKey(a) != cacheKey(b) {
-		t.Fatal("ExtraHeaders must not affect the cache key")
+	if cacheKey(a) == cacheKey(b) {
+		t.Fatal("ExtraHeaders must affect the cache key")
 	}
 }
 

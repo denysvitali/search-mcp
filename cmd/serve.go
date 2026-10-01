@@ -340,24 +340,31 @@ func newMCPServer(service *searchdomain.Service) *mcp.Server {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args webReadArgs) (*mcp.CallToolResult, webReadResult, error) {
 		readCtx, cancel := withConfiguredTimeout(ctx, viper.GetDuration("read_timeout"))
 		defer cancel()
-		if args.Links != nil && *args.Links {
-			content, err := reader.ExtractLinks(readCtx, args.URL)
-			if err != nil {
-				return nil, webReadResult{}, err
-			}
-			return structuredResult(), webReadResult{Content: content}, nil
-		}
 		var query string
 		if args.Query != nil {
 			query = *args.Query
 		}
-		content, err := reader.ReadWithOptions(readCtx, args.URL, reader.ReadOptions{
-			MaxLength:    intOrDefault(args.MaxLength, 0),
-			StartIndex:   intOrDefault(args.StartIndex, 0),
-			Query:        query,
-			ContextLines: intOrDefault(args.Context, 0),
-			MaxMatches:   intOrDefault(args.MaxMatches, 0),
-		})
+		opts := reader.ReadOptions{
+			MaxLength:       intOrDefault(args.MaxLength, 0),
+			StartIndex:      intOrDefault(args.StartIndex, 0),
+			Query:           query,
+			ContextLines:    intOrDefault(args.Context, 0),
+			ContextLinesSet: args.Context != nil,
+			MaxMatches:      intOrDefault(args.MaxMatches, 0),
+		}
+		if err := opts.Validate(); err != nil {
+			return nil, webReadResult{}, err
+		}
+		var content string
+		var err error
+		if args.Links != nil && *args.Links {
+			content, err = reader.ExtractLinks(readCtx, args.URL)
+			if err == nil {
+				content, err = opts.Apply(content)
+			}
+		} else {
+			content, err = reader.ReadWithOptions(readCtx, args.URL, opts)
+		}
 		if err != nil {
 			return nil, webReadResult{}, err
 		}

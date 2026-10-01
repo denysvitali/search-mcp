@@ -13,6 +13,9 @@ const defaultPageCacheTTL = 15 * time.Minute
 // nothing, the whole map is reset (same policy as the search result cache).
 const maxPageCacheEntries = 256
 
+// maxPageCacheBytes also bounds large pages, independent of the entry count.
+const maxPageCacheBytes = 32 << 20
+
 type pageCacheEntry struct {
 	content      string
 	etag         string
@@ -107,20 +110,10 @@ func (c *pageCache) refresh(url string) (string, bool) {
 func (c *pageCache) store(url, content, etag, lastModified string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.ttl <= 0 {
+	if c.ttl <= 0 || len(content) > maxPageCacheBytes {
 		return
 	}
-	if len(c.entries) >= maxPageCacheEntries {
-		now := time.Now()
-		for key, entry := range c.entries {
-			if now.After(entry.expires) {
-				delete(c.entries, key)
-			}
-		}
-		if len(c.entries) >= maxPageCacheEntries {
-			c.entries = make(map[string]*pageCacheEntry)
-		}
-	}
+	c.makeRoom(url, len(content))
 	entry := &pageCacheEntry{
 		content:      content,
 		etag:         etag,
@@ -129,6 +122,24 @@ func (c *pageCache) store(url, content, etag, lastModified string) {
 	}
 	c.entries[url] = entry
 	c.persist(url, entry)
+}
+
+// makeRoom enforces both budgets for network and disk-cache insertions.
+// Caller must hold c.mu. Expired entries are reclaimed before resetting.
+func (c *pageCache) makeRoom(url string, contentBytes int) {
+	delete(c.entries, url)
+	now := time.Now()
+	total := contentBytes
+	for key, entry := range c.entries {
+		if now.After(entry.expires) {
+			delete(c.entries, key)
+			continue
+		}
+		total += len(entry.content)
+	}
+	if len(c.entries) >= maxPageCacheEntries || total > maxPageCacheBytes {
+		c.entries = make(map[string]*pageCacheEntry)
+	}
 }
 
 // expireAll marks every entry stale; used by tests to exercise revalidation.

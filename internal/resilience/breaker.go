@@ -47,6 +47,7 @@ type CircuitBreaker struct {
 	opts  BreakerOptions
 
 	mu           sync.Mutex
+	generation   uint64
 	state        breakerState
 	failures     int
 	openedAt     time.Time
@@ -81,12 +82,16 @@ func (c *CircuitBreaker) Name() string { return c.inner.Name() }
 
 // Search proxies to the inner provider, applying circuit-breaker logic.
 func (c *CircuitBreaker) Search(ctx context.Context, req search.Request) (search.Response, error) {
-	if err := c.beforeCall(); err != nil {
+	if err := ctx.Err(); err != nil {
+		return search.Response{}, err
+	}
+	generation, err := c.beforeCall()
+	if err != nil {
 		return search.Response{}, err
 	}
 
 	resp, err := c.inner.Search(ctx, req)
-	c.afterCall(err)
+	c.afterCall(generation, err, errors.Is(ctx.Err(), context.Canceled))
 	if err != nil {
 		return search.Response{}, err
 	}
@@ -94,7 +99,7 @@ func (c *CircuitBreaker) Search(ctx context.Context, req search.Request) (search
 }
 
 // beforeCall checks the breaker state and decides whether the call may proceed.
-func (c *CircuitBreaker) beforeCall() error {
+func (c *CircuitBreaker) beforeCall() (uint64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -103,27 +108,40 @@ func (c *CircuitBreaker) beforeCall() error {
 		if c.opts.now().Sub(c.openedAt) >= c.opts.Cooldown {
 			// Transition to half-open and let this single call be the trial.
 			c.state = stateHalfOpen
+			c.generation++
 			c.halfOpenBusy = true
 			recordBreakerTransition(c.inner.Name(), "half-open")
-			return nil
+			return c.generation, nil
 		}
-		return fmt.Errorf("%s: %w", c.inner.Name(), ErrCircuitOpen)
+		return c.generation, fmt.Errorf("%s: %w", c.inner.Name(), ErrCircuitOpen)
 	case stateHalfOpen:
 		// Only one trial call is permitted while half-open.
 		if c.halfOpenBusy {
-			return fmt.Errorf("%s: %w", c.inner.Name(), ErrCircuitOpen)
+			return c.generation, fmt.Errorf("%s: %w", c.inner.Name(), ErrCircuitOpen)
 		}
 		c.halfOpenBusy = true
-		return nil
+		return c.generation, nil
 	default: // stateClosed
-		return nil
+		return c.generation, nil
 	}
 }
 
 // afterCall records the outcome and updates the breaker state.
-func (c *CircuitBreaker) afterCall(err error) {
+func (c *CircuitBreaker) afterCall(generation uint64, err error, canceled bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Calls admitted before an open/half-open transition cannot change the
+	// current trial's state. Caller cancellation is not evidence of failure.
+	if generation != c.generation {
+		return
+	}
+	if canceled {
+		if c.state == stateHalfOpen {
+			c.halfOpenBusy = false
+		}
+		return
+	}
 
 	if c.state == stateHalfOpen {
 		c.halfOpenBusy = false
@@ -132,6 +150,7 @@ func (c *CircuitBreaker) afterCall(err error) {
 	if err == nil {
 		// Success closes the breaker and resets the failure count.
 		if c.state != stateClosed {
+			c.generation++
 			recordBreakerTransition(c.inner.Name(), "closed")
 		}
 		c.state = stateClosed
@@ -145,12 +164,14 @@ func (c *CircuitBreaker) afterCall(err error) {
 	case stateHalfOpen:
 		// Trial failed: re-open and restart the cooldown.
 		c.state = stateOpen
+		c.generation++
 		c.openedAt = c.opts.now()
 		recordBreakerTransition(c.inner.Name(), "open")
 	default: // stateClosed
 		c.failures++
 		if c.failures >= c.opts.Threshold {
 			c.state = stateOpen
+			c.generation++
 			c.openedAt = c.opts.now()
 			recordBreakerTransition(c.inner.Name(), "open")
 		}

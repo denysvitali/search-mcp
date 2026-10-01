@@ -2,9 +2,11 @@ package reader
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -78,5 +80,46 @@ func TestDiskCachePrunesExpiredOnEnable(t *testing.T) {
 	}
 	if len(files) != 0 {
 		t.Errorf("expired entries not pruned: %d files remain", len(files))
+	}
+}
+
+func TestDiskCacheLoadsRespectMemoryBudgets(t *testing.T) {
+	c := &pageCache{dir: t.TempDir(), ttl: time.Hour, entries: make(map[string]*pageCacheEntry)}
+	for i := range maxPageCacheEntries + 20 {
+		key := fmt.Sprintf("https://example.test/%d", i)
+		c.persist(key, &pageCacheEntry{content: "small", expires: time.Now().Add(time.Hour)})
+	}
+	for i := range maxPageCacheEntries + 20 {
+		if _, ok := c.getFresh(fmt.Sprintf("https://example.test/%d", i)); !ok {
+			t.Fatal("disk entry missing")
+		}
+		if len(c.entries) > maxPageCacheEntries {
+			t.Fatal("disk loads bypassed memory cap")
+		}
+	}
+	big := strings.Repeat("x", maxResponseBodyBytes)
+	for i := range 4 {
+		c.store(fmt.Sprintf("https://large.test/%d", i), big, "", "")
+	}
+	total := 0
+	for _, entry := range c.entries {
+		total += len(entry.content)
+	}
+	if total > maxPageCacheBytes {
+		t.Fatalf("cached %d bytes above budget", total)
+	}
+}
+
+func TestDiskCacheLeavesUnrelatedFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	body := []byte(`{"expires":"2000-01-01T00:00:00Z","content":"user settings"}`)
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	pruneDiskCache(dir)
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != string(body) {
+		t.Fatalf("unrelated file changed: %q, %v", got, err)
 	}
 }

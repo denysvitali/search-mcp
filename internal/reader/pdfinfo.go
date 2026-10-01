@@ -30,6 +30,10 @@ func pdfSummary(body []byte, urlStr string) (summary string, err error) {
 		return "", fmt.Errorf("failed to parse PDF: %w", err)
 	}
 
+	if _, err := parsePDFPageSpec("", reader.NumPage()); err != nil {
+		return "", err
+	}
+
 	info := reader.Trailer().Key("Info")
 	title := pdfInfoText(info, "Title")
 	if title == "" {

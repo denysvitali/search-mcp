@@ -224,6 +224,21 @@ around surviving that:
 - `search_batch` — run up to ten queries in parallel; returns an ordered `items` array with exactly one `{query, response}` or `{query, error}` entry per input query, including duplicates. Legacy `responses`/`errors` fields are retained for older clients, but the map cannot preserve duplicate query strings.
 - `web_read` — fetch a URL and return Markdown, with `max_length`/`start_index` for chunked reads, `query` to grep within the page, and `links` to list its links. Several hosts are pulled through their native APIs and rendered as structured Markdown: GitHub repos / issues / pull-requests / blobs, GitLab issues and merge requests, Gerrit changes, Gitiles trees and blobs, Reddit comment threads, Hacker News items, Lobsters stories, Stack Overflow questions, Wikipedia articles, arXiv abstracts, pkg.go.dev packages, and YouTube videos with public transcripts. Everything else is fetched as HTML and converted via `html-to-markdown`, with RSS/Atom, JSON and PDF handled by content type.
 - `read_pdf` — fetch a PDF and return selected page ranges or case-insensitive search matches with page numbers and optional line context. It never returns PDF bytes.
+
+Reader pagination applies to page content, query matches, and link lists. An
+explicit `context: 0` returns matching lines only; omitted context defaults to two
+lines. Match and page limits report truncation. Relative links resolve against the
+final redirect URL and HTML `base`. arXiv PDF URLs return full document text;
+arXiv abstract URLs return metadata and the abstract. PDFs without extractable
+text report that OCR may be needed.
+
+Reader downloads are limited to 10 MiB and PDF page counts to 10,000. Oversized
+documents and recognized access/challenge pages return errors. Rendered pages are
+cached within both a 256-entry limit and a 32 MiB content budget. Two-column PDF
+prose is detected heuristically; complex layouts and image-only scans remain
+limited. See the [live MCP audit](docs/audit-2026-10-01.md) for findings, regression
+coverage, provider observations, and the optional reproducible audit command.
+
 - `provider_status` — report each provider's health: whether it is usable, its circuit-breaker state, consecutive failures, cooldown remaining, the last error, and rate-limit headroom.
 
 `serve` speaks MCP over stdio by default; `--http <addr>` serves the streamable HTTP transport instead. Loopback HTTP listeners are allowed without authentication. A non-loopback listener such as `:8080` or `0.0.0.0:8080` requires `--http-token TOKEN`; clients can send `Authorization: Bearer TOKEN` (or `X-Search-MCP-Token`). Request bodies are capped at 1 MiB.

@@ -59,7 +59,7 @@ func (c *pageCache) loadFromDisk(url string) *pageCacheEntry {
 		return nil
 	}
 	var stored diskCacheEntry
-	if err := json.Unmarshal(data, &stored); err != nil || stored.URL != url {
+	if err := json.Unmarshal(data, &stored); err != nil || stored.URL != url || len(stored.Content) > maxPageCacheBytes {
 		return nil
 	}
 	entry := &pageCacheEntry{
@@ -68,6 +68,7 @@ func (c *pageCache) loadFromDisk(url string) *pageCacheEntry {
 		lastModified: stored.LastModified,
 		expires:      stored.Expires,
 	}
+	c.makeRoom(url, len(entry.content))
 	c.entries[url] = entry
 	return entry
 }
@@ -89,8 +90,19 @@ func (c *pageCache) persist(url string, entry *pageCacheEntry) {
 		return
 	}
 	target := cachePath(c.dir, url)
-	tmp := target + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// Unique temporary names keep separate MCP processes from racing over
+	// one shared .tmp file. CreateTemp uses mode 0600.
+	file, err := os.CreateTemp(c.dir, ".page-cache-*.tmp")
+	if err != nil {
+		return
+	}
+	tmp := file.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return
+	}
+	if err := file.Close(); err != nil {
 		return
 	}
 	if err := os.Rename(tmp, target); err != nil {
@@ -118,7 +130,7 @@ func pruneDiskCache(dir string) {
 	var candidates []candidate
 	now := time.Now()
 	for _, file := range files {
-		if file.IsDir() || filepath.Ext(file.Name()) != ".json" {
+		if file.IsDir() || !isPageCacheFile(file.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, file.Name())
@@ -144,4 +156,13 @@ func pruneDiskCache(dir string) {
 	for _, c := range candidates[:len(candidates)-maxDiskCacheEntries] {
 		_ = os.Remove(c.path)
 	}
+}
+
+// Only prune files owned by this cache, even in a directory with other JSON.
+func isPageCacheFile(name string) bool {
+	if len(name) != 64+len(".json") || filepath.Ext(name) != ".json" {
+		return false
+	}
+	_, err := hex.DecodeString(name[:64])
+	return err == nil
 }

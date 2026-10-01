@@ -38,6 +38,7 @@ const (
 	// maxResponseBodyBytes caps how many bytes we read from any remote
 	// response body, protecting against unbounded/malicious payloads.
 	maxResponseBodyBytes = 10 << 20 // 10 MiB
+	maxPDFPages          = 10000
 
 	// maxErrorBodyBytes caps how many bytes of a non-OK response body we read
 	// to include in an error message.
@@ -60,12 +61,16 @@ var allowPrivateHosts = false
 // their respective JSON APIs; everything else is fetched as HTML and
 // converted via html-to-markdown.
 func Read(ctx context.Context, urlStr string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	parsedURL, err := validateURL(urlStr)
 	if err != nil {
 		return "", err
 	}
 
 	client := newHTTPClient()
+	defer client.CloseIdleConnections()
 	if isRedditThreadURL(parsedURL) {
 		return fetchRedditContentAsMarkdown(ctx, client, parsedURL)
 	}
@@ -110,7 +115,14 @@ func Read(ctx context.Context, urlStr string) (string, error) {
 		return fetchStackOverflowContentAsMarkdown(ctx, client, parsedURL)
 	}
 	if isArxivURL(parsedURL) {
-		return fetchArxivContentAsMarkdown(ctx, client, parsedURL)
+		content, err := fetchArxivContentAsMarkdown(ctx, client, parsedURL)
+		if err == nil {
+			return content, nil
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		// The public abstract page remains useful when the Atom API is down.
 	}
 	return fetchWithWaybackFallback(ctx, client, parsedURL.String())
 }
@@ -278,23 +290,19 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 		return content
 	}
 
-	contentType := resp.Header.Get("Content-Type")
-	if isPDFResponse(contentType, urlStr) {
-		body, err := io.ReadAll(limitedBody(resp.Body))
-		if err != nil {
-			return "", fmt.Errorf("failed to read PDF response body: %w", err)
-		}
+	body, err := readResponseBody(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	contentType := responseMediaType(resp, body)
+	if contentType == "application/pdf" || bytes.HasPrefix(body, []byte("%PDF-")) {
 		text, err := extractPDFText(body)
 		if err != nil {
 			return "", err
 		}
 		return cache(text), nil
 	}
-	if !strings.Contains(contentType, "text/html") && !strings.Contains(contentType, "application/xhtml") {
-		body, err := io.ReadAll(limitedBody(resp.Body))
-		if err != nil {
-			return "", fmt.Errorf("failed to read response body: %w", err)
-		}
+	if contentType != "text/html" && contentType != "application/xhtml+xml" {
 		if isBinaryResponse(contentType, body) {
 			return "", fmt.Errorf("refusing to return binary response (%s)", contentType)
 		}
@@ -305,11 +313,6 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 			return cache(pretty), nil
 		}
 		return cache(string(body)), nil
-	}
-
-	body, err := io.ReadAll(limitedBody(resp.Body))
-	if err != nil {
-		return "", fmt.Errorf("failed to read response body: %w", err)
 	}
 	if challenge, detected, challengeErr := parseAnubisChallenge(body); detected {
 		if challengeErr != nil {
@@ -324,7 +327,7 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 		if resp.StatusCode != http.StatusOK {
 			return "", &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
 		}
-		body, err = io.ReadAll(limitedBody(resp.Body))
+		body, err = readResponseBody(resp.Body)
 		if err != nil {
 			return "", fmt.Errorf("read response after Anubis challenge: %w", err)
 		}
@@ -333,17 +336,21 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 		}
 	}
 
-	// Prefer the readability extraction: it strips navigation, footers, and
-	// other boilerplate, typically shrinking the Markdown dramatically. Pages
-	// it cannot confidently extract fall back to full-page conversion.
-	if markdown, ok := readableMarkdown(body, urlStr); ok {
+	finalURL := responseURL(resp, urlStr)
+	doc, err := prepareHTML(body, finalURL)
+	if err != nil {
+		return "", err
+	}
+	normalized, err := doc.Html()
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize HTML: %w", err)
+	}
+	// Resolve links before readability or fallback conversion, so both paths
+	// navigate relative to the final redirect destination and HTML base.
+	if markdown, ok := readableMarkdown([]byte(normalized), finalURL); ok {
 		return cache(markdown), nil
 	}
 
-	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("failed to parse HTML: %w", err)
-	}
 	doc.Find("script, style, nav, footer, header, aside").Each(func(i int, s *goquery.Selection) {
 		s.Remove()
 	})
@@ -405,20 +412,22 @@ func convertHTMLToMarkdown(html string) (string, error) {
 	return markdown, nil
 }
 
-func isPDFResponse(contentType, urlStr string) bool {
-	mediaType := strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
-	return strings.EqualFold(mediaType, "application/pdf") ||
-		strings.HasSuffix(strings.ToLower(strings.SplitN(urlStr, "?", 2)[0]), ".pdf")
-}
-
-func extractPDFText(body []byte) (string, error) {
+func extractPDFText(body []byte) (text string, err error) {
+	defer recoverPDF(&text, &err)
 	reader, err := pdf.NewReader(bytes.NewReader(body), int64(len(body)))
 	if err != nil {
 		return "", fmt.Errorf("failed to parse PDF: %w", err)
 	}
 
+	if _, err := parsePDFPageSpec("", reader.NumPage()); err != nil {
+		return "", err
+	}
 	pages := extractPDFPages(reader)
-	return cleanMarkdown(strings.Join(pages, "\n\n")), nil
+	text = cleanMarkdown(strings.Join(pages, "\n\n"))
+	if text == "" {
+		return "[no extractable text; this PDF may require OCR]", nil
+	}
+	return text, nil
 }
 
 func extractPDFPages(reader *pdf.Reader) []string {
@@ -431,7 +440,7 @@ func extractPDFPages(reader *pdf.Reader) []string {
 
 func extractPDFPage(page pdf.Page) string {
 	var text strings.Builder
-	for _, row := range pdfRows(page) {
+	for _, row := range orderPDFRows(pdfRows(page)) {
 		line := joinPDFRow(row)
 		if line == "" {
 			continue
@@ -446,11 +455,14 @@ func formatPDFPages(pages []string, selected []int, query string, contextLines, 
 	lowerQuery := strings.ToLower(query)
 	var output strings.Builder
 	results := 0
+	truncated := false
+pagesLoop:
 	for _, pageNumber := range selected {
 		lines := strings.Split(pages[pageNumber-1], "\n")
 		if query == "" {
 			if results >= maxResults {
-				break
+				truncated = true
+				break pagesLoop
 			}
 			writePDFPage(&output, pageNumber, lines)
 			results++
@@ -462,13 +474,20 @@ func formatPDFPages(pages []string, selected []int, query string, contextLines, 
 				continue
 			}
 			if results >= maxResults {
-				break
+				truncated = true
+				break pagesLoop
 			}
 			start := max(0, lineNumber-contextLines)
 			end := min(len(lines), lineNumber+contextLines+1)
 			writePDFPageLines(&output, pageNumber, start+1, lines[start:end])
 			results++
 		}
+	}
+	if results == 0 && query != "" {
+		return fmt.Sprintf("[no matches for %q in selected PDF pages]", query)
+	}
+	if truncated {
+		fmt.Fprintf(&output, "\n\n[results truncated at %d; narrow pages/query or increase max_results]", maxResults)
 	}
 	return strings.TrimSpace(output.String())
 }
@@ -482,6 +501,10 @@ func writePDFPageLines(output *strings.Builder, pageNumber, firstLine int, lines
 		output.WriteString("\n\n")
 	}
 	fmt.Fprintf(output, "## Page %d\n", pageNumber)
+	if strings.TrimSpace(strings.Join(lines, "")) == "" {
+		output.WriteString("[no extractable text; this page may require OCR]\n")
+		return
+	}
 	for offset, line := range lines {
 		fmt.Fprintf(output, "%d: %s\n", firstLine+offset, line)
 	}
@@ -502,6 +525,9 @@ func min(a, b int) int {
 }
 
 func parsePDFPageSpec(spec string, totalPages int) ([]int, error) {
+	if totalPages < 0 || totalPages > maxPDFPages {
+		return nil, fmt.Errorf("PDF page count %d exceeds supported limit of %d", totalPages, maxPDFPages)
+	}
 	if strings.TrimSpace(spec) == "" {
 		pages := make([]int, totalPages)
 		for i := range pages {
@@ -544,7 +570,8 @@ func parsePDFPageSpec(spec string, totalPages int) ([]int, error) {
 // The page-aware extraction below uses the same positional rows as the
 // generic PDF reader, but keeps page boundaries so callers can target pages
 // or search with context.
-func readPDFPages(body []byte, pageSpec, query string, contextLines, maxResults int) (string, error) {
+func readPDFPages(body []byte, pageSpec, query string, contextLines, maxResults int) (text string, err error) {
+	defer recoverPDF(&text, &err)
 	reader, err := pdf.NewReader(bytes.NewReader(body), int64(len(body)))
 	if err != nil {
 		return "", fmt.Errorf("failed to parse PDF: %w", err)
@@ -553,11 +580,15 @@ func readPDFPages(body []byte, pageSpec, query string, contextLines, maxResults 
 	if err != nil {
 		return "", err
 	}
+	query = strings.TrimSpace(query)
 	pages := make([]string, reader.NumPage())
-	for _, pageNumber := range selected {
+	for i, pageNumber := range selected {
+		if query == "" && i >= maxResults {
+			break
+		}
 		pages[pageNumber-1] = extractPDFPage(reader.Page(pageNumber))
 	}
-	return formatPDFPages(pages, selected, query, contextLines, maxResults), nil
+	return formatPDFPages(pages, selected, strings.TrimSpace(query), contextLines, maxResults), nil
 }
 
 func fetchPDF(ctx context.Context, client *http.Client, urlStr string) ([]byte, error) {
@@ -573,11 +604,11 @@ func fetchPDF(ctx context.Context, client *http.Client, urlStr string) ([]byte, 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
 	}
-	body, err := io.ReadAll(limitedBody(resp.Body))
+	body, err := readResponseBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read PDF response body: %w", err)
 	}
-	if !isPDFResponse(resp.Header.Get("Content-Type"), urlStr) && !bytes.HasPrefix(body, []byte("%PDF-")) {
+	if !bytes.HasPrefix(bytes.TrimSpace(body), []byte("%PDF-")) {
 		return nil, fmt.Errorf("response is not a PDF")
 	}
 	return body, nil
@@ -597,7 +628,12 @@ func ReadPDF(ctx context.Context, urlStr, pageSpec, query string, contextLines, 
 	if maxResults <= 0 {
 		return "", fmt.Errorf("max_results must be positive")
 	}
-	body, err := fetchPDF(ctx, newHTTPClient(), parsedURL.String())
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	client := newHTTPClient()
+	defer client.CloseIdleConnections()
+	body, err := fetchPDF(ctx, client, parsedURL.String())
 	if err != nil {
 		return "", err
 	}

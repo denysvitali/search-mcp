@@ -1,10 +1,8 @@
 package reader
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,12 +17,16 @@ const maxExtractedLinks = 500
 // the absolute links on the page with their anchor text, so a caller can
 // navigate a site without re-reading full page content.
 func ExtractLinks(ctx context.Context, urlStr string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	parsedURL, err := validateURL(urlStr)
 	if err != nil {
 		return "", err
 	}
 
 	client := newHTTPClient()
+	defer client.CloseIdleConnections()
 	req, err := newRequest(ctx, parsedURL.String(), defaultAccept)
 	if err != nil {
 		return "", err
@@ -37,14 +39,13 @@ func ExtractLinks(ctx context.Context, urlStr string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
 	}
-	contentType := resp.Header.Get("Content-Type")
-	if !strings.Contains(contentType, "text/html") && !strings.Contains(contentType, "application/xhtml") {
-		return "", fmt.Errorf("cannot extract links from %s content", contentType)
-	}
-
-	body, err := io.ReadAll(limitedBody(resp.Body))
+	body, err := readResponseBody(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read HTML: %w", err)
+		return "", err
+	}
+	contentType := responseMediaType(resp, body)
+	if contentType != "text/html" && contentType != "application/xhtml+xml" {
+		return "", fmt.Errorf("cannot extract links from %s content", contentType)
 	}
 	if challenge, detected, challengeErr := parseAnubisChallenge(body); detected {
 		if challengeErr != nil {
@@ -59,30 +60,31 @@ func ExtractLinks(ctx context.Context, urlStr string) (string, error) {
 		if resp.StatusCode != http.StatusOK {
 			return "", &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
 		}
-		body, err = io.ReadAll(limitedBody(resp.Body))
+		body, err = readResponseBody(resp.Body)
 		if err != nil {
 			return "", fmt.Errorf("read links page after Anubis challenge: %w", err)
 		}
 	}
 
-	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
+	finalURL := responseURL(resp, parsedURL.String())
+	doc, err := prepareHTML(body, finalURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse HTML: %w", err)
+		return "", err
 	}
-
-	base := parsedURL
-	if href, ok := doc.Find("base[href]").First().Attr("href"); ok {
-		if baseURL, err := parsedURL.Parse(href); err == nil {
-			base = baseURL
-		}
+	base, err := url.Parse(finalURL)
+	if err != nil {
+		return "", err
 	}
 
 	seen := make(map[string]bool)
 	total := 0
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Links on %s\n\n", parsedURL)
+	fmt.Fprintf(&b, "# Links on %s\n\n", finalURL)
 	doc.Find("a[href]").EachWithBreak(func(_ int, s *goquery.Selection) bool {
 		href, _ := s.Attr("href")
+		if original, ok := s.Attr("data-reader-fragment"); ok && original == "true" {
+			return true
+		}
 		link, ok := resolveLink(base, href)
 		if !ok || seen[link] {
 			return true

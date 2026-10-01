@@ -34,6 +34,8 @@ type ReadOptions struct {
 	Query string
 	// ContextLines is the number of lines of context around each query match.
 	ContextLines int
+	// ContextLinesSet distinguishes an explicit zero from the default.
+	ContextLinesSet bool
 	// MaxMatches caps how many query matches are returned.
 	MaxMatches int
 }
@@ -41,25 +43,46 @@ type ReadOptions struct {
 // ReadWithOptions fetches the URL like Read and then applies pagination or an
 // in-page query to the resulting Markdown.
 func ReadWithOptions(ctx context.Context, urlStr string, opts ReadOptions) (string, error) {
-	if opts.MaxLength < 0 {
-		return "", fmt.Errorf("max_length must not be negative")
-	}
-	if opts.StartIndex < 0 {
-		return "", fmt.Errorf("start_index must not be negative")
-	}
-	if opts.ContextLines < 0 || opts.ContextLines > maxQueryContextLines {
-		return "", fmt.Errorf("context must be between 0 and %d", maxQueryContextLines)
-	}
-	if opts.MaxMatches < 0 || opts.MaxMatches > maxQueryMatches {
-		return "", fmt.Errorf("max_matches must be between 0 and %d", maxQueryMatches)
+	if err := opts.Validate(); err != nil {
+		return "", err
 	}
 
 	content, err := Read(ctx, urlStr)
 	if err != nil {
 		return "", err
 	}
+	return opts.Apply(content)
+}
+
+// Validate checks options before performing any network request.
+func (opts ReadOptions) Validate() error {
+	if opts.MaxLength < 0 {
+		return fmt.Errorf("max_length must not be negative")
+	}
+	if opts.StartIndex < 0 {
+		return fmt.Errorf("start_index must not be negative")
+	}
+	if opts.ContextLines < 0 || opts.ContextLines > maxQueryContextLines {
+		return fmt.Errorf("context must be between 0 and %d", maxQueryContextLines)
+	}
+	if opts.MaxMatches < 0 || opts.MaxMatches > maxQueryMatches {
+		return fmt.Errorf("max_matches must be between 0 and %d", maxQueryMatches)
+	}
+
+	return nil
+}
+
+// Apply shapes already fetched content, including query and link results.
+func (opts ReadOptions) Apply(content string) (string, error) {
+	if err := opts.Validate(); err != nil {
+		return "", err
+	}
 	if strings.TrimSpace(opts.Query) != "" {
-		return grepContent(content, opts.Query, opts.ContextLines, opts.MaxMatches), nil
+		contextLines := opts.ContextLines
+		if contextLines == 0 && !opts.ContextLinesSet {
+			contextLines = defaultQueryContextLines
+		}
+		content = grepContent(content, strings.TrimSpace(opts.Query), contextLines, opts.MaxMatches)
 	}
 	return paginateContent(content, opts.StartIndex, opts.MaxLength), nil
 }
@@ -74,7 +97,7 @@ func paginateContent(content string, start, maxLength int) string {
 		return fmt.Sprintf("[no content: start_index=%d is beyond the end of the %d-character document]", start, total)
 	}
 	end := total
-	if maxLength > 0 && start+maxLength < total {
+	if maxLength > 0 && maxLength < total-start {
 		end = start + maxLength
 	}
 	window := string(runes[start:end])
@@ -88,9 +111,6 @@ func paginateContent(content string, start, maxLength int) string {
 // query, each block prefixed with 1-based line numbers and padded with
 // contextLines of surrounding lines. Overlapping blocks are merged.
 func grepContent(content, query string, contextLines, maxMatches int) string {
-	if contextLines == 0 {
-		contextLines = defaultQueryContextLines
-	}
 	if maxMatches == 0 {
 		maxMatches = defaultMaxQueryMatches
 	}
@@ -99,12 +119,14 @@ func grepContent(content, query string, contextLines, maxMatches int) string {
 	lowerQuery := strings.ToLower(query)
 
 	var matched []int
+	truncated := false
 	for i, line := range lines {
 		if strings.Contains(strings.ToLower(line), lowerQuery) {
-			matched = append(matched, i)
 			if len(matched) >= maxMatches {
+				truncated = true
 				break
 			}
+			matched = append(matched, i)
 		}
 	}
 	if len(matched) == 0 {
@@ -133,6 +155,9 @@ func grepContent(content, query string, contextLines, maxMatches int) string {
 			fmt.Fprintf(&output, "%d: %s\n", i+1, lines[i])
 		}
 		lastPrinted = end
+	}
+	if truncated {
+		fmt.Fprintf(&output, "[matches truncated at %d; increase max_matches or narrow query]\n", maxMatches)
 	}
 	return strings.TrimSpace(output.String())
 }

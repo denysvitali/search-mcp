@@ -77,8 +77,8 @@ func TestIsArxivURL(t *testing.T) {
 		wantID string
 	}{
 		{"https://arxiv.org/abs/2103.00020", true, "2103.00020"},
-		{"https://arxiv.org/pdf/2103.00020", true, "2103.00020"},
-		{"https://arxiv.org/pdf/2103.00020.pdf", true, "2103.00020"},
+		{"https://arxiv.org/pdf/2103.00020", false, "2103.00020"},
+		{"https://arxiv.org/pdf/2103.00020.pdf", false, "2103.00020"},
 		{"https://arxiv.org/abs/cs/0112017", true, "cs/0112017"},
 		{"https://arxiv.org/list/cs.AI/recent", false, ""},
 		{"https://example.com/abs/1", false, ""},

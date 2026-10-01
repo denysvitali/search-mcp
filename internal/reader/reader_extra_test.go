@@ -489,42 +489,19 @@ func TestReadRedirectLimit(t *testing.T) {
 	}
 }
 
-func TestReadSizeCap(t *testing.T) {
-	// Serve a non-HTML body larger than the cap; output must be truncated.
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		chunk := strings.Repeat("a", 1<<20)
-		for i := 0; i < 12; i++ { // 12 MiB, over the 10 MiB cap
-			_, _ = w.Write([]byte(chunk))
-		}
-	}))
-	defer ts.Close()
-
-	out, err := Read(context.Background(), ts.URL)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if len(out) != maxResponseBodyBytes {
-		t.Fatalf("len(out) = %d, want cap %d", len(out), maxResponseBodyBytes)
-	}
-}
-
-func TestReadHTMLSizeCapDoesNotError(t *testing.T) {
-	// An oversized HTML body should still parse (truncated) without error.
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		_, _ = w.Write([]byte("<html><body><h1>Title</h1><p>"))
-		_, _ = w.Write([]byte(strings.Repeat("x", 11<<20)))
-		_, _ = w.Write([]byte("</p></body></html>"))
-	}))
-	defer ts.Close()
-
-	out, err := Read(context.Background(), ts.URL)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !strings.Contains(out, "# Title") {
-		t.Errorf("missing title in truncated HTML output")
+func TestReadRejectsOversizedDocuments(t *testing.T) {
+	for _, contentType := range []string{"text/plain", "text/html", "application/pdf"} {
+		t.Run(contentType, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", contentType)
+				_, _ = w.Write([]byte(strings.Repeat("x", maxResponseBodyBytes+1)))
+			}))
+			defer server.Close()
+			_, err := Read(context.Background(), server.URL)
+			if err == nil || !strings.Contains(err.Error(), "size limit") {
+				t.Fatalf("error = %v, want explicit size limit error", err)
+			}
+		})
 	}
 }
 

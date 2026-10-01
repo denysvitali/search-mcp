@@ -12,7 +12,7 @@ import (
 
 // arxivAPIBaseURL is the arXiv Atom query API root. It is a var (not a const)
 // so tests can point it at an httptest server.
-var arxivAPIBaseURL = "http://export.arxiv.org/api/query"
+var arxivAPIBaseURL = "https://export.arxiv.org/api/query"
 
 type arxivFeed struct {
 	XMLName xml.Name     `xml:"feed"`
@@ -51,6 +51,9 @@ type arxivCategory struct {
 func isArxivURL(parsedURL *url.URL) bool {
 	host := strings.ToLower(parsedURL.Hostname())
 	if host != "arxiv.org" {
+		return false
+	}
+	if !strings.HasPrefix(parsedURL.Path, "/abs/") {
 		return false
 	}
 	_, ok := parseArxivID(parsedURL)

@@ -2,7 +2,8 @@ package resilience
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
+	"slices"
 	"sync"
 	"time"
 
@@ -64,6 +65,9 @@ func (p *CachingProvider) Name() string { return p.inner.Name() }
 // Search returns a cached response when fresh, otherwise calls the inner
 // provider and caches a successful result.
 func (p *CachingProvider) Search(ctx context.Context, req search.Request) (search.Response, error) {
+	if err := ctx.Err(); err != nil {
+		return search.Response{}, err
+	}
 	if p.opts.TTL <= 0 {
 		// Caching disabled: pass through.
 		return p.inner.Search(ctx, req)
@@ -99,7 +103,7 @@ func (p *CachingProvider) get(key string) (search.Response, bool) {
 		delete(p.entries, key)
 		return search.Response{}, false
 	}
-	return entry.resp, true
+	return cloneResponse(entry.resp), true
 }
 
 // set stores resp under key, enforcing the size guard.
@@ -116,7 +120,7 @@ func (p *CachingProvider) set(key string, resp search.Response) {
 		}
 	}
 	p.entries[key] = cacheEntry{
-		resp:      resp,
+		resp:      cloneResponse(resp),
 		expiresAt: p.opts.now().Add(p.opts.TTL),
 	}
 }
@@ -131,17 +135,22 @@ func (p *CachingProvider) evictExpiredLocked() {
 	}
 }
 
-// cacheKey builds a stable key from the request fields that affect results.
-// ExtraHeaders is intentionally excluded as it carries transport concerns
-// (e.g. user agent) rather than query semantics.
+// cloneResponse prevents caller normalization/mutation from changing cached
+// results, including concurrent requests sharing one cache entry.
+func cloneResponse(resp search.Response) search.Response {
+	resp.Results = slices.Clone(resp.Results)
+	resp.Degraded = slices.Clone(resp.Degraded)
+	return resp
+}
+
+// cacheKey includes headers because they can change authorization, language,
+// and upstream behavior. JSON keeps field boundaries unambiguous and sorts maps.
 func cacheKey(req search.Request) string {
-	return fmt.Sprintf("q=%s\x00n=%d\x00c=%s\x00l=%s\x00s=%s\x00f=%s\x00p=%s",
-		req.Query,
-		req.Count,
-		req.Country,
-		req.Language,
-		req.SafeSearch,
-		req.Freshness,
-		req.Provider,
-	)
+	key, _ := json.Marshal(struct {
+		Query                                              string
+		Count                                              int
+		Country, Language, SafeSearch, Freshness, Provider string
+		Headers                                            map[string]string
+	}{req.Query, req.Count, req.Country, req.Language, req.SafeSearch, req.Freshness, req.Provider, req.ExtraHeaders})
+	return string(key)
 }
