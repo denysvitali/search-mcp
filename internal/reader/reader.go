@@ -26,6 +26,8 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	readability "github.com/go-shiori/go-readability"
 	"github.com/ledongthuc/pdf"
+
+	"github.com/denysvitali/search-mcp/internal/browserhttp"
 )
 
 const (
@@ -147,19 +149,12 @@ func validateURL(urlStr string) (*url.URL, error) {
 
 func newHTTPClient() *http.Client {
 	dialer := &net.Dialer{Timeout: defaultHTTPTimeout, Control: guardDialAddress}
-	transport := &http.Transport{
-		// Do not honor ambient HTTP(S)_PROXY here: the dial guard protects the
-		// address actually dialed, and a proxy could otherwise fetch a private
-		// redirect target on our behalf while the client only connects to the
-		// proxy's public address.
-		Proxy:                 nil,
-		DialContext:           dialer.DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
-	}
+	// A Chrome-like TLS handshake: Go's own ClientHello under a Chrome
+	// User-Agent is a bot signature that web application firewalls block.
+	// Every socket still goes through the guarded dialer, and ambient
+	// HTTP(S)_PROXY is never honored: a proxy could otherwise fetch a private
+	// redirect target while the client only connects to the proxy's address.
+	transport := browserhttp.New(dialer.DialContext, 10*time.Second)
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Timeout: defaultHTTPTimeout, Transport: transport, Jar: jar}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -234,6 +229,7 @@ func newRequest(ctx context.Context, urlStr, accept string) (*http.Request, erro
 	}
 	req.Header.Set("User-Agent", defaultUserAgent)
 	req.Header.Set("Accept-Language", defaultAcceptLang)
+	browserhttp.SetChromeHeaders(req)
 	if accept != "" {
 		req.Header.Set("Accept", accept)
 	} else {

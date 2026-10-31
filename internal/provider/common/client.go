@@ -3,11 +3,13 @@ package common
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/denysvitali/search-mcp/internal/browserhttp"
 	"github.com/denysvitali/search-mcp/internal/search"
 )
 
@@ -26,10 +28,12 @@ func LimitedBody(r io.Reader) io.Reader {
 	return io.LimitReader(r, maxResponseBodyBytes)
 }
 
-// newHTTPClient builds the *http.Client shared per provider instance, with
-// defaultHTTPTimeout applied.
+// NewHTTPClient builds the *http.Client shared per provider instance, with
+// defaultHTTPTimeout applied and a Chrome-like TLS handshake, because search
+// pages reject Go's ClientHello as a bot.
 func NewHTTPClient() *http.Client {
-	return &http.Client{Timeout: defaultHTTPTimeout}
+	dialer := &net.Dialer{Timeout: defaultHTTPTimeout}
+	return &http.Client{Timeout: defaultHTTPTimeout, Transport: browserhttp.New(dialer.DialContext, 10*time.Second)}
 }
 
 // applyExtraHeaders sets any caller-supplied request.ExtraHeaders on the
