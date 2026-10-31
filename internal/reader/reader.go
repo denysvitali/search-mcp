@@ -696,9 +696,16 @@ func isBinaryResponse(contentType string, body []byte) bool {
 	lowerMediaType := strings.ToLower(mediaType)
 	if strings.HasPrefix(lowerMediaType, "image/") ||
 		strings.HasPrefix(lowerMediaType, "audio/") ||
-		strings.HasPrefix(lowerMediaType, "video/") ||
-		(lowerMediaType == "application/octet-stream") ||
-		(strings.HasPrefix(lowerMediaType, "application/") && !isTextApplication(lowerMediaType)) {
+		strings.HasPrefix(lowerMediaType, "video/") {
+		return true
+	}
+	// application/octet-stream only means "untyped": servers often send text
+	// files (ICS calendars, CSV, plain text) that way. Return those when the
+	// body itself sniffs as text; real binaries stay refused.
+	if lowerMediaType == "application/octet-stream" {
+		return !strings.HasPrefix(http.DetectContentType(body), "text/") || bytes.IndexByte(body, 0) >= 0 || !utf8.Valid(body)
+	}
+	if strings.HasPrefix(lowerMediaType, "application/") && !isTextApplication(lowerMediaType) {
 		return true
 	}
 	return bytes.IndexByte(body, 0) >= 0 || !utf8.Valid(body)

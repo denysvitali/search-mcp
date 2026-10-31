@@ -274,3 +274,40 @@ func TestIsGitHubRepoURL(t *testing.T) {
 		}
 	}
 }
+
+// Servers often send text files such as ICS calendars as untyped
+// application/octet-stream; their text is returned, real binaries are not.
+func TestReadReturnsUntypedTextResponses(t *testing.T) {
+	ics := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nDTSTART;VALUE=DATE:20261125\r\nSUMMARY:Karton\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	for _, tc := range []struct {
+		name string
+		body []byte
+		want string
+	}{
+		{"ics calendar", []byte(ics), "SUMMARY:Karton"},
+		{"utf-8 csv", []byte("datum,abfall\n2026-11-25,Kartonsammlung Zürich\n"), "Kartonsammlung Zürich"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/octet-stream")
+				_, _ = w.Write(tc.body)
+			}))
+			defer server.Close()
+			got, err := Read(context.Background(), server.URL)
+			if err != nil || !strings.Contains(got, tc.want) {
+				t.Fatalf("Read = %q, %v; want text containing %q", got, err, tc.want)
+			}
+		})
+	}
+	for _, body := range [][]byte{{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0}, {0x1f, 0x8b, 8, 0, 0, 0, 0, 0}, []byte("text\xffwith invalid utf-8")} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(body)
+		}))
+		_, err := Read(context.Background(), server.URL)
+		server.Close()
+		if err == nil || !strings.Contains(err.Error(), "binary response") {
+			t.Fatalf("binary %q: err = %v, want refusal", body, err)
+		}
+	}
+}
