@@ -1,11 +1,12 @@
 // Package browserhttp provides an HTTP transport whose TLS handshake looks like
 // Chrome's.
 //
-// Go's crypto/tls ClientHello (JA3/JA4) is a well-known bot signature, and
-// pairing it with a Chrome User-Agent is a mismatch that web application
+// Go's crypto/tls ClientHello (JA3/JA4) and its HTTP/2 SETTINGS and
+// pseudo-header order (the Akamai fingerprint) are well-known bot signatures,
+// and pairing them with a Chrome User-Agent is a mismatch that web application
 // firewalls flag. This transport performs the handshake with uTLS using a
-// Chrome ClientHello, then speaks HTTP/2 or HTTP/1.1 depending on the protocol
-// the server negotiates, exactly as a browser would.
+// Chrome ClientHello, then speaks HTTP/2 with Chrome's SETTINGS, connection
+// window and pseudo-header order, or HTTP/1.1, as the server negotiates.
 package browserhttp
 
 import (
@@ -18,8 +19,9 @@ import (
 	"sync"
 	"time"
 
+	fhttp "github.com/bogdanfinn/fhttp"
+	fhttp2 "github.com/bogdanfinn/fhttp/http2"
 	utls "github.com/refraction-networking/utls"
-	"golang.org/x/net/http2"
 )
 
 // DialFunc dials a plain network connection. Callers pass their guarded dialer
@@ -33,10 +35,10 @@ type Transport struct {
 	rootCAs          *x509.CertPool
 
 	h1 *http.Transport
-	h2 *http2.Transport
+	h2 *fhttp2.Transport
 
 	mu      sync.Mutex
-	h2Conns map[string]*http2.ClientConn
+	h2Conns map[string]*fhttp2.ClientConn
 	h1Hosts map[string]bool
 }
 
@@ -51,7 +53,7 @@ func WithRootCAs(pool *x509.CertPool) Option {
 // New returns a Transport that dials with dial and bounds each TLS handshake.
 func New(dial DialFunc, handshakeTimeout time.Duration, opts ...Option) *Transport {
 	t := &Transport{dial: dial, handshakeTimeout: handshakeTimeout,
-		h2Conns: map[string]*http2.ClientConn{}, h1Hosts: map[string]bool{}}
+		h2Conns: map[string]*fhttp2.ClientConn{}, h1Hosts: map[string]bool{}}
 	for _, opt := range opts {
 		opt(t)
 	}
@@ -65,8 +67,70 @@ func New(dial DialFunc, handshakeTimeout time.Duration, opts ...Option) *Transpo
 		IdleConnTimeout:       90 * time.Second,
 		ExpectContinueTimeout: time.Second,
 	}
-	t.h2 = &http2.Transport{ReadIdleTimeout: 30 * time.Second, PingTimeout: 15 * time.Second}
+	t.h2 = chromeHTTP2()
 	return t
+}
+
+// chromeHTTP2 is an HTTP/2 client with Chrome's connection preface: SETTINGS
+// 1:65536;2:0;4:6291456;6:262144, a 15663105-byte connection window and the
+// m,a,s,p pseudo-header order (Akamai 1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p).
+func chromeHTTP2() *fhttp2.Transport {
+	return &fhttp2.Transport{
+		Settings: map[fhttp2.SettingID]uint32{
+			fhttp2.SettingHeaderTableSize:   65536,
+			fhttp2.SettingEnablePush:        0,
+			fhttp2.SettingInitialWindowSize: 6291456,
+			fhttp2.SettingMaxHeaderListSize: 262144,
+		},
+		SettingsOrder: []fhttp2.SettingID{
+			fhttp2.SettingHeaderTableSize, fhttp2.SettingEnablePush,
+			fhttp2.SettingInitialWindowSize, fhttp2.SettingMaxHeaderListSize,
+		},
+		ConnectionFlow:    15663105,
+		PseudoHeaderOrder: []string{":method", ":authority", ":scheme", ":path"},
+		HeaderPriority:    &fhttp2.PriorityParam{StreamDep: 0, Exclusive: true, Weight: 255},
+		ReadIdleTimeout:   30 * time.Second,
+		PingTimeout:       15 * time.Second,
+	}
+}
+
+// chromeHeaderOrder is the order Chrome sends navigation request headers in.
+var chromeHeaderOrder = []string{
+	"cache-control", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "upgrade-insecure-requests",
+	"user-agent", "accept", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-user", "sec-fetch-dest",
+	"referer", "accept-encoding", "accept-language", "cookie", "priority",
+}
+
+// roundTripH2 sends req over an fhttp HTTP/2 connection and converts the
+// request and response between net/http and fhttp types.
+func roundTripH2(cc *fhttp2.ClientConn, req *http.Request) (*http.Response, error) {
+	header := fhttp.Header{}
+	for key, values := range req.Header {
+		header[key] = values
+	}
+	header[fhttp.HeaderOrderKey] = chromeHeaderOrder
+	freq := &fhttp.Request{
+		Method: req.Method, URL: req.URL, Proto: "HTTP/2.0", ProtoMajor: 2, Header: header,
+		Body: req.Body, GetBody: req.GetBody, ContentLength: req.ContentLength, Host: req.Host,
+	}
+	fresp, err := cc.RoundTrip(freq.WithContext(req.Context()))
+	if err != nil {
+		return nil, err
+	}
+	resp := &http.Response{
+		Status: fresp.Status, StatusCode: fresp.StatusCode, Proto: fresp.Proto,
+		ProtoMajor: fresp.ProtoMajor, ProtoMinor: fresp.ProtoMinor,
+		Header: http.Header{}, Trailer: http.Header{}, Body: fresp.Body,
+		ContentLength: fresp.ContentLength, TransferEncoding: fresp.TransferEncoding,
+		Uncompressed: fresp.Uncompressed, Request: req,
+	}
+	for key, values := range fresp.Header {
+		resp.Header[key] = values
+	}
+	for key, values := range fresp.Trailer {
+		resp.Trailer[key] = values
+	}
+	return resp, nil
 }
 
 // RoundTrip implements http.RoundTripper.
@@ -84,7 +148,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	h1 := t.h1Hosts[address]
 	t.mu.Unlock()
 	if cc != nil {
-		return cc.RoundTrip(req)
+		return roundTripH2(cc, req)
 	}
 	if h1 {
 		return t.h1.RoundTrip(req)
@@ -93,7 +157,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	if conn.ConnectionState().NegotiatedProtocol != http2.NextProtoTLS {
+	if conn.ConnectionState().NegotiatedProtocol != fhttp2.NextProtoTLS {
 		// The server chose HTTP/1.1: remember it and use the pooled HTTP/1.1
 		// transport, which dials with the same Chrome ClientHello.
 		_ = conn.Close()
@@ -109,28 +173,30 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	t.mu.Lock()
 	if existing := t.h2Conns[address]; existing != nil && existing.CanTakeNewRequest() {
-		// A concurrent request already established a connection; keep it and
-		// let this one serve only the current request.
+		// A concurrent request already established a connection: use it and
+		// drop this unused one.
 		t.mu.Unlock()
-		resp, err := cc.RoundTrip(req)
-		cc.SetDoNotReuse()
-		return resp, err
+		_ = cc.Close()
+		return roundTripH2(existing, req)
 	}
 	t.h2Conns[address] = cc
 	t.mu.Unlock()
-	return cc.RoundTrip(req)
+	return roundTripH2(cc, req)
 }
 
-// CloseIdleConnections closes idle HTTP/1.1 and HTTP/2 connections.
+// CloseIdleConnections closes idle HTTP/1.1 connections and gracefully shuts
+// down HTTP/2 connections once their in-flight streams finish.
 func (t *Transport) CloseIdleConnections() {
 	t.h1.CloseIdleConnections()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for address, cc := range t.h2Conns {
-		if cc.State().StreamsActive == 0 {
-			_ = cc.Close()
-			delete(t.h2Conns, address)
-		}
+		delete(t.h2Conns, address)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_ = cc.Shutdown(ctx)
+		}()
 	}
 }
 

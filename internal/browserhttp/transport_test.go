@@ -1,6 +1,7 @@
 package browserhttp
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -147,5 +148,31 @@ func TestSetChromeHeadersKeepsCallerValues(t *testing.T) {
 	SetChromeHeaders(req)
 	if req.Header.Get("Sec-Fetch-Site") != "same-origin" || req.Header.Get("Sec-Ch-Ua-Mobile") != "?0" {
 		t.Fatalf("headers = %v", req.Header)
+	}
+}
+
+// Servers compress HTML; the HTTP/2 path must request and transparently
+// decompress gzip like net/http does, or the reader would see binary data.
+func TestHTTP2DecompressesGzip(t *testing.T) {
+	recorder := &helloRecorder{}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			_, _ = io.WriteString(w, "plain: no gzip requested")
+			return
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		_, _ = io.WriteString(gz, r.Proto+" compressed page")
+		_ = gz.Close()
+	}))
+	server.EnableHTTP2 = true
+	server.TLS = &tls.Config{GetConfigForClient: recorder.record}
+	server.StartTLS()
+	defer server.Close()
+	pool := x509.NewCertPool()
+	pool.AddCert(server.Certificate())
+	client := &http.Client{Transport: New(dialer(server), 5*time.Second, WithRootCAs(pool))}
+	if got := get(t, client, exampleURL(server)); got != "HTTP/2.0 compressed page" {
+		t.Fatalf("body = %q; want the decompressed HTTP/2 page", got)
 	}
 }
