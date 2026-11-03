@@ -511,3 +511,63 @@ func TestNewHTTPClientTimeout(t *testing.T) {
 		t.Errorf("timeout = %v, want %v", c.Timeout, defaultHTTPTimeout)
 	}
 }
+
+func TestReadKeepsPageDatesAndHeadingOutline(t *testing.T) {
+	body := strings.Repeat("<p>Release notes filler so readability keeps the article.</p>", 40)
+	page := `<!DOCTYPE html><html><head>
+<meta property="article:published_time" content="2026-10-14T09:00:00Z">
+<meta property="article:modified_time" content="2026-10-20">
+</head><body><article>
+<h1>API changelog</h1>
+<p>Overview of the quarter.</p>
+<h2>October</h2>
+<p>Shipped <time datetime="2026-10-03">Terra</time> and Rosalind.</p>
+<h2>September</h2>
+<p>Earlier items.</p>
+` + body + `
+</article></body></html>`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(page))
+	}))
+	defer server.Close()
+
+	out, err := Read(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	for _, want := range []string{
+		"Page dates (from the page's own metadata, not verified):",
+		"- published: 2026-10-14T09:00:00Z",
+		"- modified: 2026-10-20",
+		"- time: 2026-10-03",
+		"Headings:",
+		"- API changelog",
+		"  - October",
+		"  - September",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out[:800])
+		}
+	}
+	// The index comes before the body, so a truncated reply still has it.
+	if strings.Index(out, "Headings:") > strings.Index(out, "# API changelog") {
+		t.Fatal("heading outline is not before the article")
+	}
+}
+
+func TestHeadingOutlineCapsAndSkipsNonHeadings(t *testing.T) {
+	var b strings.Builder
+	for i := range maxOutlineEntries + 3 {
+		fmt.Fprintf(&b, "# Section %d\nnot a heading\n", i)
+	}
+	b.WriteString("#no-space\n")
+	outline := headingOutline(b.String())
+	lines := strings.Split(strings.TrimSuffix(outline, "\n"), "\n")
+	if len(lines) != maxOutlineEntries+1 || lines[len(lines)-1] != "- …" {
+		t.Fatalf("outline lines = %d last %q, want cap plus ellipsis", len(lines), lines[len(lines)-1])
+	}
+	if strings.Contains(outline, "not a heading") || strings.Contains(outline, "no-space") {
+		t.Fatalf("outline kept non-headings: %q", outline)
+	}
+}

@@ -337,6 +337,9 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 	if err != nil {
 		return "", err
 	}
+	// Dates live in metadata and in <time>, not in the article text a
+	// changelog question needs. Capture them before either renderer runs.
+	facts := pageFacts(doc)
 	normalized, err := doc.Html()
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize HTML: %w", err)
@@ -344,7 +347,7 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 	// Resolve links before readability or fallback conversion, so both paths
 	// navigate relative to the final redirect destination and HTML base.
 	if markdown, ok := readableMarkdown([]byte(normalized), finalURL); ok {
-		return cache(markdown), nil
+		return cache(withPageFacts(markdown, facts)), nil
 	}
 
 	doc.Find("script, style, nav, footer, header, aside").Each(func(i int, s *goquery.Selection) {
@@ -361,7 +364,132 @@ func fetchGenericHTMLAsMarkdown(ctx context.Context, client *http.Client, urlStr
 		return "", err
 	}
 
-	return cache(cleanMarkdown(markdown)), nil
+	return cache(withPageFacts(cleanMarkdown(markdown), facts)), nil
+}
+
+// maxPageFacts bounds the metadata block prepended to a page. A marketing
+// page can carry dozens of <time> nodes; the first ones are the ones a
+// "when did this ship?" question can use.
+const maxPageFacts = 12
+
+// pageFacts collects the dates a renderer would otherwise throw away: the
+// page's own published/modified metadata, then visible <time> values. Text
+// is taken only from attributes the page author set, never invented.
+func pageFacts(doc *goquery.Document) []string {
+	var facts []string
+	add := func(label, value string) {
+		value = strings.Join(strings.Fields(value), " ")
+		if value == "" || len(facts) >= maxPageFacts {
+			return
+		}
+		facts = append(facts, label+": "+value)
+	}
+	for _, meta := range []struct{ selector, label string }{
+		{`meta[property="article:published_time"]`, "published"},
+		{`meta[property="article:modified_time"]`, "modified"},
+		{`meta[name="date"]`, "published"},
+		{`meta[name="pubdate"]`, "published"},
+		{`meta[name="dc.date"]`, "published"},
+		{`meta[name="dc.date.issued"]`, "published"},
+		{`meta[itemprop="datePublished"]`, "published"},
+		{`meta[itemprop="dateModified"]`, "modified"},
+	} {
+		if content, ok := doc.Find(meta.selector).First().Attr("content"); ok {
+			add(meta.label, content)
+		}
+	}
+	doc.Find("time").Each(func(_ int, s *goquery.Selection) {
+		when, _ := s.Attr("datetime")
+		if when == "" {
+			when = s.Text()
+		}
+		add("time", when)
+	})
+	return facts
+}
+
+// withPageFacts prepends a short block of the page's own dates and a heading
+// outline. Both survive a truncated tool reply, so the caller can see when
+// the page says something happened and which sections the cut-off tail holds.
+func withPageFacts(markdown string, facts []string) string {
+	outline := headingOutline(markdown)
+	if len(facts) == 0 && outline == "" {
+		return markdown
+	}
+	var b strings.Builder
+	if len(facts) > 0 {
+		b.WriteString("Page dates (from the page's own metadata, not verified):\n")
+		for _, fact := range facts {
+			b.WriteString("- ")
+			b.WriteString(fact)
+			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
+	}
+	if outline != "" {
+		b.WriteString("Headings:\n")
+		b.WriteString(outline)
+		b.WriteString("\n\n")
+	}
+	b.WriteString(markdown)
+	return b.String()
+}
+
+// maxOutlineEntries caps the heading index. It is an index of the page, not
+// a second copy of it.
+const maxOutlineEntries = 40
+
+// headingOutline lists Markdown headings in document order so a caller that
+// only sees the start of a long page still knows which sections exist.
+func headingOutline(markdown string) string {
+	var b strings.Builder
+	count := 0
+	for _, line := range strings.Split(markdown, "\n") {
+		level, title, ok := markdownHeading(line)
+		if !ok {
+			continue
+		}
+		if count >= maxOutlineEntries {
+			if count > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString("- …")
+			break
+		}
+		if count > 0 {
+			b.WriteByte('\n')
+		}
+		for range level - 1 {
+			b.WriteString("  ")
+		}
+		b.WriteString("- ")
+		b.WriteString(title)
+		count++
+	}
+	return b.String()
+}
+
+// markdownHeading reports the level and text of an ATX heading. It ignores
+// setext headings and heading-looking text inside fenced code, which the
+// converter does not emit as a bare line starting with hashes.
+func markdownHeading(line string) (int, string, bool) {
+	if !strings.HasPrefix(line, "#") {
+		return 0, "", false
+	}
+	level := 0
+	for level < len(line) && line[level] == '#' {
+		level++
+	}
+	if level == 0 || level > 6 || level == len(line) || line[level] != ' ' {
+		return 0, "", false
+	}
+	title := strings.TrimSpace(line[level+1:])
+	title = strings.TrimRight(title, " #")
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return 0, "", false
+	}
+	return level, title, true
 }
 
 // minReadableTextLength is the smallest extracted-article text size that we
