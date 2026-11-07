@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Module: `github.com/denysvitali/search-mcp`, Go 1.25.5.
 - Build: `go build .` (or `go run .` to execute directly).
-- Lint: `golangci-lint run` (CI pins `v2.11.4`, see `.golangci.yml`).
+- Lint: `golangci-lint run` (CI pins `v2.15.0`, built with the module's Go, see `.golangci.yml`).
 - Vet: `go vet ./...`.
 - Unit tests: `go test ./...`.
 - Single test: `go test ./internal/resilience/ -run TestRetry -race` (add `-v` for verbose).

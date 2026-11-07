@@ -25,7 +25,10 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.11.4
+          version: v2.15.0
+          # Build the linter with the module's Go: a prebuilt binary made with
+          # an older Go refuses to load a module that targets a newer one.
+          install-mode: goinstall
 
   test:
     name: Test
