@@ -1,6 +1,9 @@
 package search
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestSplitPublished(t *testing.T) {
 	for _, tc := range []struct {
@@ -72,5 +75,27 @@ func TestSplitPublished(t *testing.T) {
 				t.Errorf("rest = %q, want %q", rest, tc.wantRest)
 			}
 		})
+	}
+}
+
+func TestSplitPublishedResolvesRelativeAges(t *testing.T) {
+	saved := now
+	now = func() time.Time { return time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { now = saved })
+	for _, tc := range []struct{ in, date, rest string }{
+		{"15 hours ago · Everything about tomorrow", "2026-11-06", "Everything about tomorrow"},
+		{"2 hours ago · Fresh", "2026-11-07", "Fresh"},
+		{"6 days ago · Strikes", "2026-11-01", "Strikes"},
+		{"a day ago · One", "2026-11-06", "One"},
+		{"1 week ago · Week", "2026-10-31", "Week"},
+		{"Yesterday · Old", "2026-11-06", "Old"},
+		{"3 months ago · Approx", "2026-08-09", "Approx"},
+		{"many days ago · not an age", "", "many days ago · not an age"},
+		{"In 2 days · future", "", "In 2 days · future"},
+	} {
+		date, rest := SplitPublished(tc.in)
+		if date != tc.date || rest != tc.rest {
+			t.Errorf("SplitPublished(%q) = %q, %q; want %q, %q", tc.in, date, rest, tc.date, tc.rest)
+		}
 	}
 }

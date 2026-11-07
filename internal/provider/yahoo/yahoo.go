@@ -117,6 +117,9 @@ func (y *Yahoo) searchPage(ctx context.Context, req search.Request, page, count 
 	if req.Language != "" {
 		values.Set("vl", strings.ToLower(strings.TrimSpace(req.Language)))
 	}
+	if btf := yahooFreshness(req.Freshness); btf != "" {
+		values.Set("btf", btf)
+	}
 	if page > 0 {
 		values.Set("b", strconv.Itoa(page*yahooResultsPerPage+1))
 	}
@@ -127,7 +130,7 @@ func (y *Yahoo) searchPage(ctx context.Context, req search.Request, page, count 
 	}
 	httpReq.Header.Set("User-Agent", yahooUserAgent)
 	httpReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	httpReq.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	httpReq.Header.Set("Accept-Language", yahooAcceptLanguage(req.Language))
 	common.ApplyExtraHeaders(httpReq, req)
 
 	resp, err := y.client.Do(httpReq)
@@ -244,4 +247,42 @@ func unwrapYahooURL(href string) string {
 		return decoded
 	}
 	return href
+}
+
+// yahooFreshness maps a relative freshness window to Yahoo's btf filter
+// (past day, week or month). Yahoo has no past-year window, so "year" and
+// unknown values search without a time filter.
+func yahooFreshness(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "day", "d", "pd":
+		return "d"
+	case "week", "w", "pw":
+		return "w"
+	case "month", "m", "pm":
+		return "m"
+	default:
+		return ""
+	}
+}
+
+// yahooAcceptLanguage prefers the requested language, then English, so a
+// German query asked in German gets German snippets and local pages.
+func yahooAcceptLanguage(language string) string {
+	language = strings.ToLower(strings.TrimSpace(language))
+	if language == "" || language == "en" || !validLanguageTag(language) {
+		return "en-US,en;q=0.9"
+	}
+	return language + ",en;q=0.7"
+}
+
+func validLanguageTag(tag string) bool {
+	if len(tag) < 2 || len(tag) > 8 {
+		return false
+	}
+	for _, r := range tag {
+		if (r < 'a' || r > 'z') && r != '-' {
+			return false
+		}
+	}
+	return true
 }

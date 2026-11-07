@@ -1,6 +1,8 @@
 package search
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -45,6 +47,9 @@ func SplitPublished(description string) (published, rest string) {
 		if prefix == "" || len(prefix) > 20 {
 			continue
 		}
+		if date, ok := relativeDate(prefix); ok {
+			return date, strings.TrimSpace(remainder)
+		}
 		for _, layout := range publishedLayouts {
 			parsed, err := time.Parse(layout, prefix)
 			if err != nil {
@@ -54,4 +59,34 @@ func SplitPublished(description string) (published, rest string) {
 		}
 	}
 	return "", description
+}
+
+// now is the clock relative ages are resolved against; tests replace it.
+var now = time.Now
+
+// relativeAge matches the ages HTML engines print instead of a date, such as
+// "15 hours ago", "a day ago" or "6 days ago".
+var relativeAge = regexp.MustCompile(`^(\d{1,3}|an?) (minute|hour|day|week|month|year)s? ago$`)
+
+// relativeDate resolves a relative age to a UTC calendar date. Months and
+// years are approximate (30 and 365 days); a caller only needs to tell a
+// fresh page from a stale one, and an exact date beats "N days ago".
+func relativeDate(prefix string) (string, bool) {
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	if prefix == "yesterday" {
+		return now().UTC().AddDate(0, 0, -1).Format("2006-01-02"), true
+	}
+	m := relativeAge.FindStringSubmatch(prefix)
+	if m == nil {
+		return "", false
+	}
+	n := 1
+	if m[1] != "a" && m[1] != "an" {
+		n, _ = strconv.Atoi(m[1])
+	}
+	unit := map[string]time.Duration{
+		"minute": time.Minute, "hour": time.Hour, "day": 24 * time.Hour,
+		"week": 7 * 24 * time.Hour, "month": 30 * 24 * time.Hour, "year": 365 * 24 * time.Hour,
+	}[m[2]]
+	return now().UTC().Add(-time.Duration(n) * unit).Format("2006-01-02"), true
 }

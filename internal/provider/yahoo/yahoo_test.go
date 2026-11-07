@@ -184,3 +184,29 @@ func TestYahooSearchClassifiesBlocking(t *testing.T) {
 		})
 	}
 }
+
+// Freshness maps to Yahoo's btf filter and the language to Accept-Language,
+// so "latest" questions get recent pages and German questions local ones.
+func TestYahooFreshnessAndLanguage(t *testing.T) {
+	for _, tc := range []struct{ freshness, language, btf, accept string }{
+		{"", "", "", "en-US,en;q=0.9"},
+		{"day", "de", "d", "de,en;q=0.7"},
+		{"week", "de-ch", "w", "de-ch,en;q=0.7"},
+		{"month", "en", "m", "en-US,en;q=0.9"},
+		{"year", "x\r\nevil", "", "en-US,en;q=0.9"},
+	} {
+		var btf, accept string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			btf, accept = r.URL.Query().Get("btf"), r.Header.Get("Accept-Language")
+			_, _ = w.Write([]byte(yahooFixture))
+		}))
+		_, err := NewYahoo(server.URL).Search(context.Background(), search.Request{Query: "q", Count: 1, Freshness: tc.freshness, Language: tc.language})
+		server.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if btf != tc.btf || accept != tc.accept {
+			t.Errorf("freshness %q language %q: btf=%q accept=%q; want %q %q", tc.freshness, tc.language, btf, accept, tc.btf, tc.accept)
+		}
+	}
+}
