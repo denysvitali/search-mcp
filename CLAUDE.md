@@ -23,7 +23,7 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`: GoReleaser publishes ar
 Two entry points share one `search.Service`:
 
 - **CLI** (`cmd/`, `cobra` + `viper`): `search QUERY`, `read URL`, `serve` (MCP stdio), `version`.
-- **MCP server** (`cmd/serve.go`): exposes `search`, `search_batch`, `web_read`, `read_pdf`, and `provider_status`. Transport is stdio, or streamable HTTP with `--http <addr>`.
+- **MCP server** (`cmd/serve.go` wiring, `mcp_types.go` args/helpers, `mcp_batch.go` batch + status, `serve_http.go` HTTP transport): exposes `search`, `search_batch`, `web_read`, `read_pdf`, and `provider_status`. Transport is stdio, or streamable HTTP with `--http <addr>`.
 
 `main.go` just calls `cmd.Execute()`. The `version` var lives in `cmd/root.go` and is overridden at build via `-ldflags "-X github.com/denysvitali/search-mcp/cmd.version=..."` (GoReleaser does this).
 
@@ -75,7 +75,7 @@ Providers that can paginate loop over `searchPage(ctx, req, page)` until they ha
 
 `Read(ctx, urlStr)` (`reader.go`; HTTP client and SSRF guard in `httpclient.go`, PDF handling in `pdf.go`) validates scheme (`http`/`https`) then dispatches URL-shape predicates to a site-specific fetcher, falling back to `fetchGenericHTMLAsMarkdown` (HTML → `html-to-markdown` v2, then `cleanMarkdown` to collapse blank lines and trim).
 
-Site-specific readers: `github.go` (repos + issues/PRs via the GitHub API), `reddit.go` (`.json` thread append), `hackernews.go` (Algolia + Firebase), `stackoverflow.go` (API), `arxiv.go` (abs page), `gerrit.go` (any Gerrit instance's `/c/<project>/+/<change>` via its REST API — strips the `)]}'` XSSI prefix, falls back from `<project>~<id>` to the bare change id), `gitiles.go` (any Gitiles instance's `/<project>/+/<ref>/<path>`: `?format=TEXT` blobs — whose ls-tree output for trees is parsed as a directory listing — then `?format=JSON` trees, then scraped HTML; falls through to the generic fetch if all fail). Each file owns the URL-shape predicate and the renderer; `reader.go` only wires the dispatch.
+Site-specific readers: `github.go` (repos + issues/PRs via the GitHub API; `github_api.go` request/pagination/rate-limit, `github_render.go` Markdown output), `reddit.go` (`.json` thread append), `hackernews.go` (Algolia + Firebase), `stackoverflow.go` (API), `arxiv.go` (abs page), `gerrit.go` (any Gerrit instance's `/c/<project>/+/<change>` via its REST API — strips the `)]}'` XSSI prefix, falls back from `<project>~<id>` to the bare change id), `gitiles.go` (any Gitiles instance's `/<project>/+/<ref>/<path>`: `?format=TEXT` blobs — whose ls-tree output for trees is parsed as a directory listing — then `?format=JSON` trees, then scraped HTML; falls through to the generic fetch if all fail). Each file owns the URL-shape predicate and the renderer; `reader.go` only wires the dispatch.
 
 **SSRF guard**: `guardDialAddress` runs in the dialer's `Control` callback (post-DNS, pre-connect) and rejects loopback, private, link-local, unspecified, and multicast IPs — `isDisallowedIP` covers both v4 and v4-in-v6 forms. `allowPrivateHosts` is a test-only escape hatch flipped by the test suite to hit `httptest` loopback servers. Response bodies are capped at 10 MiB (`maxResponseBodyBytes`); error bodies at 4 KiB (`readErrorBody`).
 

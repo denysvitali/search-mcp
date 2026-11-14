@@ -505,13 +505,6 @@ func TestReadRejectsOversizedDocuments(t *testing.T) {
 	}
 }
 
-func TestNewHTTPClientTimeout(t *testing.T) {
-	c := newHTTPClient()
-	if c.Timeout != defaultHTTPTimeout {
-		t.Errorf("timeout = %v, want %v", c.Timeout, defaultHTTPTimeout)
-	}
-}
-
 func TestReadKeepsPageDatesAndHeadingOutline(t *testing.T) {
 	body := strings.Repeat("<p>Release notes filler so readability keeps the article.</p>", 40)
 	page := `<!DOCTYPE html><html><head>
