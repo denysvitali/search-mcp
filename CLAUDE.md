@@ -12,7 +12,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Single test: `go test ./internal/resilience/ -run TestRetry -race` (add `-v` for verbose).
 - Race + coverage (matches CI): `go test -race -covermode=atomic -coverprofile=coverage.out ./...`.
 - Integration tests: `go test -run Integration .` from repo root — they `go build` the binary, start an `httptest` mock, and exercise both the CLI (`search ... --json`) and the MCP stdio/HTTP servers (`serve`) via `github.com/modelcontextprotocol/go-sdk/mcp`. They set `SEARCH_MCP_PROVIDERS` (see `mockOnlyEnv`) to keep the run hermetic — without it the fan-out default would reach the live network.
-- Release dry run: `goreleaser check` then `goreleaser build --snapshot --clean --single-target`.
+- Release dry run: `goreleaser check` then `goreleaser build --snapshot --clean --single-target` (add `release --snapshot --clean --skip=docker` to exercise archives and checksums without Docker).
+
+## Releases
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`: GoReleaser publishes archives, checksums and a changelog, and `dockers_v2` pushes a multi-arch (`linux/amd64`, `linux/arm64`) image to `ghcr.io/denysvitali/search-mcp:<version>` (plus `latest` for non-prerelease tags). The `Dockerfile` only copies the prebuilt binary (`${TARGETPLATFORM}/search-mcp`) onto distroless `static:nonroot`; it never compiles. Default `CMD` is `serve` (stdio, so run with `docker run -i`); for HTTP pass `serve --http 0.0.0.0:8080 --http-token ...`.
 
 ## Architecture
 
@@ -21,7 +25,7 @@ Two entry points share one `search.Service`:
 - **CLI** (`cmd/`, `cobra` + `viper`): `search QUERY`, `read URL`, `serve` (MCP stdio), `version`.
 - **MCP server** (`cmd/serve.go`): exposes `search`, `search_batch`, `web_read`, `read_pdf`, and `provider_status`. Transport is stdio, or streamable HTTP with `--http <addr>`.
 
-`main.go` just calls `cmd.Execute()`. The `version` var is overridden at build via `-ldflags "-X main.version=..."` (GoReleaser does this).
+`main.go` just calls `cmd.Execute()`. The `version` var lives in `cmd/root.go` and is overridden at build via `-ldflags "-X github.com/denysvitali/search-mcp/cmd.version=..."` (GoReleaser does this).
 
 ### Search pipeline
 
@@ -69,7 +73,7 @@ Providers that can paginate loop over `searchPage(ctx, req, page)` until they ha
 
 ### Reader (`internal/reader/`)
 
-`Read(ctx, urlStr)` validates scheme (`http`/`https`) then dispatches URL-shape predicates to a site-specific fetcher, falling back to `fetchGenericHTMLAsMarkdown` (HTML → `html-to-markdown` v2, then `cleanMarkdown` to collapse blank lines and trim).
+`Read(ctx, urlStr)` (`reader.go`; HTTP client and SSRF guard in `httpclient.go`, PDF handling in `pdf.go`) validates scheme (`http`/`https`) then dispatches URL-shape predicates to a site-specific fetcher, falling back to `fetchGenericHTMLAsMarkdown` (HTML → `html-to-markdown` v2, then `cleanMarkdown` to collapse blank lines and trim).
 
 Site-specific readers: `github.go` (repos + issues/PRs via the GitHub API), `reddit.go` (`.json` thread append), `hackernews.go` (Algolia + Firebase), `stackoverflow.go` (API), `arxiv.go` (abs page), `gerrit.go` (any Gerrit instance's `/c/<project>/+/<change>` via its REST API — strips the `)]}'` XSSI prefix, falls back from `<project>~<id>` to the bare change id), `gitiles.go` (any Gitiles instance's `/<project>/+/<ref>/<path>`: `?format=TEXT` blobs — whose ls-tree output for trees is parsed as a directory listing — then `?format=JSON` trees, then scraped HTML; falls through to the generic fetch if all fail). Each file owns the URL-shape predicate and the renderer; `reader.go` only wires the dispatch.
 
@@ -92,3 +96,7 @@ Priority: flags > `SEARCH_MCP_*` env > `$HOME/.config/search-mcp/search-mcp.yaml
 - All HTTP I/O uses `context.Context`; the search service aborts on `ctx.Err()` and surfaces it directly.
 - Tests sit alongside the package they cover (`*_test.go`). Integration lives at the repo root and builds a real binary — do not move it under `internal/`.
 - Commit messages are conventional commits (`feat:`, `fix:`, `refactor:`, `test:`, `ci:`); keep the body focused on the *why*.
+- Keep files focused: when a file passes roughly 500 lines or mixes concerns (HTTP plumbing, format parsing, rendering), split it by responsibility within the package.
+- Comments explain *why* (constraints, upstream quirks), never restate the code. No commented-out code, no changelog-style comments.
+- Tests must pin behavior that can regress (a captured SERP, an error classification, an edge case). Do not add tests that only re-assert a constructor, a getter, or mock wiring.
+- Prefer builtins (`min`, `max`, `slices`, `maps`) over local helpers.
